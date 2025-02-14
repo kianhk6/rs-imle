@@ -1,4 +1,4 @@
-from distutils.util import strtobool
+from distutils.util import strtobool 
 
 HPARAMS_REGISTRY = {}
 
@@ -63,6 +63,7 @@ def add_imle_arguments(parser):
     parser.add_argument('--lr_decay_iters', type=float, default=4000)  # number of iterations for warmup for scheduler
     parser.add_argument('--lr_decay_rate', type=float, default=0.25)  # number of iterations for warmup for scheduler
 
+    # num of workers 
 
     parser.add_argument('--lr', type=float, default=0.0002)  # learning rate
 
@@ -84,19 +85,24 @@ def add_imle_arguments(parser):
     parser.add_argument('--imle_factor', type=float, default=0.)  # imle soft-sampling factor -- not used in the paper
     parser.add_argument('--imle_batch', type=int, default=16)  # imle batch size used for sampling
     parser.add_argument('--subset_len', type=int, default=-1)  # subset length for training -- random subset of the dataset. -1 means full dataset
-    parser.add_argument('--latent_dim', type=int, default=1024)  # latent code dimension
+    parser.add_argument('--latent_dim', type=int, default=4096)  # latent code dimension
     parser.add_argument('--imle_perturb_coef', type=float, default=0.001)  # imle perturbation coefficient to avoid same latent codes
     parser.add_argument('--lpips_net', type=str, default='vgg')  # lpips network type
     parser.add_argument('--proj_dim', type=int, default=800)  # projection dimension for nearest neighbour search
     parser.add_argument('--proj_proportion', type=int, default=1)  # whether to use projection proportional to the lpips feature dimensions for nearest neighbour search
     parser.add_argument('--lpips_coef', type=float, default=1.0)  # lpips loss coefficient
     parser.add_argument('--l2_coef', type=float, default=0.1)  # l2 loss coefficient
+
+    # look out
     parser.add_argument('--force_factor', type=float, default=20)  # sampling factor for imle, i.e., force_factor * len(dataset)
 
     parser.add_argument('--n_mpl', type=int, default=8)  # mapping network layers
 
     parser.add_argument('--reconstruct_iter_num', type=int, default=100000)  # number of iterations for reconstructing images using backtracking
+
+    # look out 
     parser.add_argument('--imle_force_resample', type=int, default=30)  # number of iterations to wait before ignoringthe threshold and resample anyway
+    
     parser.add_argument('--snoise_factor', type=int, default=8)  # spatial noise factor
     parser.add_argument('--max_hierarchy', type=int, default=256)  # maximum hierarchy level for spatial noise, i.e., 64 means up to 64x64 spatial noise but not higher resolution
     parser.add_argument('--load_strict', type=int, default=1)  # whether to load checkpoints strict
@@ -122,7 +128,7 @@ def add_imle_arguments(parser):
 
 
     # wandb
-    parser.add_argument('--wandb_name', type=str, default='AdaptiveIMLE')  # used for wandb
+    parser.add_argument('--wandb_name', type=str, default='DiT_mix_check')  # used for wandb
     parser.add_argument('--wandb_project', type=str, default='AdaptiveIMLE')  # used for wandb
     parser.add_argument('--use_wandb', type=int, default=0)
     parser.add_argument('--wandb_mode', type=str, default='online')

@@ -13,6 +13,8 @@ from torch.optim import AdamW
 from helpers.utils import ZippedDataset
 from models import parse_layer_string
 
+
+
 class Sampler:
     def __init__(self, H, sz, preprocess_fn):
         self.pool_size = ceil(int(H.force_factor * sz) / H.imle_db_size) * H.imle_db_size
@@ -48,9 +50,13 @@ class Sampler:
         self.selected_dists_l2 = torch.empty([sz], dtype=torch.float32).cuda()
         self.selected_dists_l2[:] = np.inf 
 
+        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
+        # where you sample: sample something 32 * 32, when passing into network reshape it 
         self.temp_latent_rnds = torch.empty([self.H.imle_db_size, self.H.latent_dim], dtype=torch.float32)
         self.temp_samples = torch.empty([self.H.imle_db_size, H.image_channels, self.H.image_size, self.H.image_size],
                                         dtype=torch.float32)
+
+        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
 
         self.pool_latents = torch.randn([self.pool_size, H.latent_dim], dtype=torch.float32)
         self.sample_pool_usage = torch.ones([sz], dtype=torch.bool)
@@ -274,7 +280,7 @@ class Sampler:
             cur_latents = latents[batch_slice]
             cur_snoise = [s[batch_slice] for s in snoise]
             with torch.no_grad():
-                out = gen(cur_latents, cur_snoise)
+                out = gen(cur_latents, cur_snoise)                                
                 if(logging):
                     dist, dist_lpips, dist_l2 = self.calc_loss(target.permute(0, 3, 1, 2), out, use_mean=False, logging=True)
                     dists[batch_slice] = torch.squeeze(dist)
@@ -392,8 +398,10 @@ class Sampler:
         for j in range(self.pool_size // self.H.imle_batch):
             batch_slice = slice(j * self.H.imle_batch, (j + 1) * self.H.imle_batch)
             cur_latents = self.pool_latents[batch_slice]
-
+            
             cur_snosie = [s[batch_slice] for s in self.snoise_pool]
+            # print("hello " + cur_snosie.shape())
+
             with torch.no_grad():
                 if(self.H.search_type == 'lpips'):
                     self.pool_samples_proj[batch_slice] = self.get_projected(gen(cur_latents, cur_snosie), False)

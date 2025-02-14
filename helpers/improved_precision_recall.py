@@ -308,7 +308,7 @@ class FileNames(Dataset):
         return len(self.fnames)
 
 
-def get_custom_loader(image_dir_or_fnames, image_size=224, batch_size=50, num_workers=4, num_samples=-1):
+def get_custom_loader(image_dir_or_fnames, image_size=224, batch_size=50, num_workers=0, num_samples=-1):
     transform = []
     transform.append(transforms.Resize([image_size, image_size]))
     transform.append(transforms.ToTensor())

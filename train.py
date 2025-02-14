@@ -152,7 +152,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
         
             comb_dataset = ZippedDataset(split_x, TensorDataset(sampler.selected_latents))
-            data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=4, persistent_workers=False)
+            data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=0, persistent_workers=False)
 
             start_time = time.time()
 
@@ -268,8 +268,17 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                             sampler.selected_latents[0: H.num_images_visualize],
                                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                                             viz_batch_original.shape, imle, ema_imle,
-                                            f'{H.save_dir}/latest.png', logprint, experiment)
-
+                                            f'{H.save_dir}/latest.png', logprint, experiment)                    
+                # Save model checkpoint at the 50th epoch
+                model_checkpoint_path = f'{H.save_dir}/model_epoch_{epoch}.pt'
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': imle.state_dict(),
+                    'ema_model_state_dict': ema_imle.state_dict() if ema_imle else None,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, model_checkpoint_path)
+                
+                logprint(f'Model checkpoint saved at: {model_checkpoint_path}')
 
             if H.use_wandb:
                 wandb.log(metrics, step=iterate)

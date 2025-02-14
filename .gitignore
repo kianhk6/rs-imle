@@ -1,0 +1,20 @@
+# Ignore result directories
+new-vanilla-results/
+second-run-vanilla-results/
+wandb/
+=40.0.8/
+=40.8.0/
+=43.0.0/
+
+flowers-results/
+
+# Ignore datasets directory
+datasets/
+
+# Ignore log files
+train_log_non_DiT.txt
+train_log.txt
+
+default/
+
+datasets.zip
