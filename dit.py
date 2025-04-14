@@ -16,94 +16,9 @@ import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from diffusers.models import AutoencoderKL
 
+# abs scaling vs Positive Scaling 
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
-
-#################################################################################
-#               Embedding Layers for Timesteps and Class Labels                 #
-#################################################################################
-
-class TimestepEmbedder(nn.Module):
-    """
-    Embeds scalar timesteps into vector representations.
-    """
-    def __init__(self, hidden_size, frequency_embedding_size=256):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
-        )
-        self.frequency_embedding_size = frequency_embedding_size
-
-    # @staticmethod
-    # def timestep_embedding(t, dim, max_period=10000):
-    #     """
-    #     Create sinusoidal timestep embeddings.
-    #     :param t: a 1-D Tensor of N indices, one per batch element.
-    #                       These may be fractional.
-    #     :param dim: the dimension of the output.
-    #     :param max_period: controls the minimum frequency of the embeddings.
-    #     :return: an (N, D) Tensor of positional embeddings.
-    #     """
-    #     # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-    #     half = dim // 2
-    #     freqs = torch.exp(
-    #         -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-    #     ).to(device=t.device)
-    #     args = t[:, None].float() * freqs[None]
-    #     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    #     if dim % 2:
-    #         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    #     return embedding
-
-    # def forward(self, t):
-    #     t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-    #     t_emb = self.mlp(t_freq)
-    #     return t_emb
-
-    def forward(self, x, t=None, y=None):
-        """
-        Forward pass for DiT without diffusion steps.
-        x: (N, C, H, W) tensor of spatial inputs.
-        """
-        x = self.x_embedder(x) + self.pos_embed  # Only use spatial input
-        for block in self.blocks:
-            x = block(x, c=None)  # Remove conditional embeddings
-        x = self.final_layer(x, c=None)  # Pass through final layer
-        x = self.unpatchify(x)
-        return x
-
-
-class LabelEmbedder(nn.Module):
-    """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
-        super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-        self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
-
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, train, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
-        return embeddings
+    return x * scale + shift
 
 
 #################################################################################
@@ -112,51 +27,44 @@ class LabelEmbedder(nn.Module):
 
 class DiTBlock(nn.Module):
     """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    A DiT block using standard LayerNorm with elementwise affine (like ViT).
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        # Set elementwise_affine to True so that gamma and beta are learned within LayerNorm.
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        print(mlp_hidden_dim)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
 
-    def forward(self, x, c=None):  # Conditional input c is now optional
-        x = x + self.attn(self.norm1(x))  # Skip conditioning
-        x = x + self.mlp(self.norm2(x))  # Skip conditioning
+        # Remove separate shift and scale parameters.
+        # Retain the gate parameters if you want dynamic residual scaling.
+        self.gate_msa = nn.Parameter(torch.zeros(hidden_size))
+        self.gate_mlp = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward(self, x):
+        # The LayerNorm output already includes affine transformation.
+        x = x + self.gate_msa.unsqueeze(0) * self.attn(self.norm1(x))
+        x = x + self.gate_mlp.unsqueeze(0) * self.mlp(self.norm2(x))
         return x
-
 
 class FinalLayer(nn.Module):
     """
-    The final layer of DiT.
+    The final layer of DiT without conditioning (c), using LayerNorm with built-in affine parameters.
     """
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        # Set elementwise_affine=True so that the layer norm learns its own scaling (gamma) and shifting (beta)
+        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
 
-    # def forward(self, x, c):
-    #     shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-    #     x = modulate(self.norm_final(x), shift, scale)
-    #     x = self.linear(x)
-    #     return x
-    def forward(self, x, c=None):  # Conditional input c is now optional
-        x = self.norm_final(x)  # Skip conditional modulation
-        x = self.linear(x)  # Directly map to output
+    def forward(self, x):
+        x = self.norm_final(x)
+        x = self.linear(x)
         return x
-
-
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -170,7 +78,7 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
+        class_dropout_prob=0.0,
         num_classes=1000,
         learn_sigma=False,
     ):
@@ -180,18 +88,25 @@ class DiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
-
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = None
         self.y_embedder = None
         num_patches = self.x_embedder.num_patches
+        self.hidden_size = hidden_size
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        # self.norm = nn.LayerNorm(hidden_size, eps=1e-6)
 
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        
+        self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(self.device)
+        # Freeze all parameters
+        for param in self.vae.parameters():
+            param.requires_grad = False
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -212,15 +127,9 @@ class DiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
-        # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
+        # trying this instead of setting it to zero 
+        nn.init.xavier_uniform_(self.final_layer.linear.weight, gain=0.1)
+        # nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
@@ -247,6 +156,8 @@ class DiT(nn.Module):
 
         # Assuming cur_latents is of shape (batch, flattened_size)
         batch, flattened_size = x.shape
+        print(batch)
+
         channels = 4
         height = width = int((flattened_size // channels) ** 0.5)  # Calculate spatial dimensions
 
@@ -255,51 +166,19 @@ class DiT(nn.Module):
 
         # Reshape cur_latents
         x = x.view(batch, channels, height, width)
-
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-
-        # No timestep or class embeddings; c is set to None
-        c = None
-
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2        
+        # x = self.x_embedder(x) # (N, T, D), where T = H * W / patch_size ** 2        
         # Pass through transformer blocks
         for block in self.blocks:
-            x = block(x, c)  # Blocks are adjusted to handle c=None
+            x = block(x)  # Blocks are adjusted to handle c=None
 
-        # Final layer processing
-        x = self.final_layer(x, c)  # Final layer adjusted to handle c=None
+        x = self.final_layer(x)  # Final layer adjusted to handle c=None
+
         x = self.unpatchify(x)  # Convert back to spatial format (N, out_channels, H, W)
-        # Handle the sampling logic
-
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-        vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(device)
-
         # # Decode the latent points to images
-        decoded_images = vae.decode(x / 0.18215).sample
+        decoded_images = self.vae.decode(x / 0.18215).sample
 
         return decoded_images
-
-
-    def forward_with_cfg(self, x, t=None, y=None, cfg_scale=1.0):
-        """
-        Forward pass of DiT without timestep embeddings, with support for classifier-free guidance.
-        """
-        # Split input into halves and duplicate for guidance
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-
-        # Perform forward pass without using timesteps
-        model_out = self.forward(combined, t=None, y=y)
-
-        # Apply classifier-free guidance
-        eps, rest = model_out[:, :3], model_out[:, 3:]  # Split output into guided parts
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-
-        # Recombine outputs
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
-
 
 
 #################################################################################

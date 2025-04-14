@@ -8,6 +8,7 @@ from collections import defaultdict
 import numpy as np
 import itertools
 from dit import DiT_S_2
+from diffusers import UNet2DModel
 
 class Block(nn.Module):
     def __init__(self, in_width, middle_width, out_width, down_rate=None, residual=False, use_3x3=True, zero_last=False):
@@ -136,6 +137,17 @@ class IMLE(nn.Module):
         # self.decoder = Decoder(H)
         self.decoder = DiT_S_2()
         # self.decoder = Decoder(H)
+        # if H.use_UNET_latent:
+        #     self.decoder = UNet2DModel(
+        #     sample_size=32,  # the expected spatial dimensions of the input image patches
+        #     in_channels=3,   # number of input channels (e.g., 3 for RGB images)
+        #     out_channels=3,  # number of output channels
+        #     layers_per_block=2,
+        #     block_out_channels=(64, 128, 256, 512),
+        #     down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
+        #     up_block_types=("UpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D"))
+
+
 
     def forward(self, latents, spatial_noise=None, input_is_w=False):
         return self.decoder.forward(latents, spatial_noise, input_is_w)
