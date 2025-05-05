@@ -16,55 +16,158 @@ import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from diffusers.models import AutoencoderKL
 
-# abs scaling vs Positive Scaling 
+# The primary purpose of writing it 1+scale is to ensure that when the learned scale is zero, 
+# the multiplicative factor is 1 (i.e. an identity transformation). 
+# This means that if no scaling is learned (scale = 0), the input is left unchanged.
+# def modulate(x, shift, scale):
+#     return x * scale + shift
 def modulate(x, shift, scale):
-    return x * scale + shift
-
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
 
+class TimestepEmbedder(nn.Module):
+    """
+    Embeds scalar timesteps into vector representations and calculates the element-wise
+    running mean tensor over all function calls. It prints the full tensor every 100 (or 1000)
+    calls. In this updated version, instead of receiving t as input, we use a constant tensor.
+    """
+    def __init__(self, hidden_size, frequency_embedding_size=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+        )
+        self.frequency_embedding_size = frequency_embedding_size
+        
+        # Initialize variables for accumulating t_freq tensors and tracking statistics.
+        self.num_calls = 0
+        self.running_sum_tensor = None
+        self.curr_max = float('-inf')
+
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D or 2-D Tensor of indices.
+        :param dim: the dimension of the output embedding.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: a Tensor of shape (..., dim) of positional embeddings.
+        """
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(0, half, dtype=torch.float32,  device="cuda") / half
+        )
+        # Ensure t is float and reshape for broadcasting: (N, 1)
+        args = t.float().unsqueeze(-1) * freqs  # result shape: (N, half)
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[..., :1])], dim=-1)
+        return embedding
+
+    def forward(self, t):
+        # Use the constant tensor as the "t" input.
+        # t = torch.tensor([499.5, 499.5, 499.5, 499.5],  device="cuda")
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        
+        # Pass the timestep embeddings through the MLP.
+        t_emb = self.mlp(t_freq)
+        return t_emb
+
+# class DiTBlock(nn.Module):
+#     """
+#     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+#     """
+#     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+#         super().__init__()
+#         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+#         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         mlp_hidden_dim = int(hidden_size * mlp_ratio)
+#         approx_gelu = lambda: nn.GELU(approximate="tanh")
+#         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+
+#         self.shift_msa = nn.Parameter(torch.zeros(hidden_size))
+#         self.scale_msa = nn.Parameter(torch.ones(hidden_size))
+
+#         self.shift_mlp = nn.Parameter(torch.zeros(hidden_size))
+#         self.scale_mlp = nn.Parameter(torch.ones(hidden_size))
+
+#         # these gate parameters are used to scale the output of the respective branch (attention or MLP) 
+#         # before it’s added to the residual connection.
+#         self.gate_msa = nn.Parameter(torch.zeros(hidden_size))
+#         self.gate_mlp = nn.Parameter(torch.zeros(hidden_size))
+
+#     def forward(self, x):
+#         x = x + self.gate_msa.unsqueeze(0) * self.attn(modulate(self.norm1(x), self.shift_msa, self.scale_msa))
+#         x = x + self.gate_mlp.unsqueeze(0) * self.mlp(modulate(self.norm2(x), self.shift_mlp, self.scale_mlp))
+#         return x
+
 class DiTBlock(nn.Module):
     """
-    A DiT block using standard LayerNorm with elementwise affine (like ViT).
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
-        # Set elementwise_affine to True so that gamma and beta are learned within LayerNorm.
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        print(mlp_hidden_dim)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
 
-        # Remove separate shift and scale parameters.
-        # Retain the gate parameters if you want dynamic residual scaling.
-        self.gate_msa = nn.Parameter(torch.zeros(hidden_size))
-        self.gate_mlp = nn.Parameter(torch.zeros(hidden_size))
-
-    def forward(self, x):
-        # The LayerNorm output already includes affine transformation.
-        x = x + self.gate_msa.unsqueeze(0) * self.attn(self.norm1(x))
-        x = x + self.gate_mlp.unsqueeze(0) * self.mlp(self.norm2(x))
+    def forward(self, x, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
+
+
+# class FinalLayer(nn.Module):
+#     """
+#     The final layer of DiT without conditioning (c).
+#     """
+#     def __init__(self, hidden_size, patch_size, out_channels):
+#         super().__init__()
+#         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+
+#         # Learnable modulation parameters
+#         self.shift = nn.Parameter(torch.zeros(hidden_size))
+#         self.scale = nn.Parameter(torch.ones(hidden_size))
+
+#     def forward(self, x):
+#         x = modulate(self.norm_final(x), self.shift, self.scale)
+#         x = self.linear(x)
+#         return x
 
 class FinalLayer(nn.Module):
     """
-    The final layer of DiT without conditioning (c), using LayerNorm with built-in affine parameters.
+    The final layer of DiT.
     """
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        # Set elementwise_affine=True so that the layer norm learns its own scaling (gamma) and shifting (beta)
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
+        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
 
-    def forward(self, x):
-        x = self.norm_final(x)
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
+
+
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -81,6 +184,7 @@ class DiT(nn.Module):
         class_dropout_prob=0.0,
         num_classes=1000,
         learn_sigma=False,
+        H=None  
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -88,10 +192,12 @@ class DiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.H = H 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.t_embedder = None
+        self.t_embedder = TimestepEmbedder(hidden_size)        
         self.y_embedder = None
+
         num_patches = self.x_embedder.num_patches
         self.hidden_size = hidden_size
         # Will use fixed sin-cos embedding:
@@ -108,6 +214,14 @@ class DiT(nn.Module):
         for param in self.vae.parameters():
             param.requires_grad = False
         self.initialize_weights()
+        self.t_parameter = nn.Parameter(torch.tensor(499.5, device=self.device))
+
+        # # # Set up a learnable time constant if H.learnable_t is True.
+        if self.H is not None and self.H.learnable_t == True:
+            # Create a learnable parameter initialized to 499.5.
+            self.t_parameter = nn.Parameter(torch.tensor(499.5, device=self.device))
+        else:
+            self.t_parameter = None
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -127,9 +241,21 @@ class DiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.xavier_uniform_(block.adaLN_modulation[-1].weight, gain=0.5)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+
         # trying this instead of setting it to zero 
-        nn.init.xavier_uniform_(self.final_layer.linear.weight, gain=0.1)
-        # nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.xavier_uniform_(self.final_layer.adaLN_modulation[-1].weight, gain=0.5)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+
+        nn.init.xavier_uniform_(self.final_layer.linear.weight, gain=0.5)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
@@ -156,10 +282,22 @@ class DiT(nn.Module):
 
         # Assuming cur_latents is of shape (batch, flattened_size)
         batch, flattened_size = x.shape
-        print(batch)
-
         channels = 4
         height = width = int((flattened_size // channels) ** 0.5)  # Calculate spatial dimensions
+        B, D = x.shape  
+
+        # if you want a constant t for every sample:
+        # t = torch.full((B,), 499.5, device=x.device) 
+
+
+        # # # # Decide on the timestep constant based on whether a learnable parameter has been set.
+        if self.t_parameter is not None:
+            # Use the learnable parameter and expand it to create a tensor of shape (B,).
+            t_val = self.t_parameter.expand(B)
+        else:
+            t_val = torch.randint(0, 999, (x.shape[0],), device=x.device)
+
+        c = self.t_embedder(t_val) 
 
         # Ensure compatibility
         assert flattened_size == channels * height * width, "Flattened size must be divisible by channels"
@@ -170,9 +308,9 @@ class DiT(nn.Module):
         # x = self.x_embedder(x) # (N, T, D), where T = H * W / patch_size ** 2        
         # Pass through transformer blocks
         for block in self.blocks:
-            x = block(x)  # Blocks are adjusted to handle c=None
+            x = block(x, c)  # Blocks are adjusted to handle c=None
 
-        x = self.final_layer(x)  # Final layer adjusted to handle c=None
+        x = self.final_layer(x, c)  * 2.5 # Final layer adjusted to handle c=None
 
         x = self.unpatchify(x)  # Convert back to spatial format (N, out_channels, H, W)
         # # Decode the latent points to images
@@ -267,8 +405,15 @@ def DiT_B_4(**kwargs):
 def DiT_B_8(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
 
-def DiT_S_2(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+def DiT_S_2(H=None, **kwargs):
+    return DiT(
+        depth=12, 
+        hidden_size=384, 
+        patch_size=2, 
+        num_heads=6, 
+        H=H,            # use the function parameter, not a global
+        **kwargs
+    )
 
 def DiT_S_4(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)

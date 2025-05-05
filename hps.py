@@ -62,6 +62,9 @@ def add_imle_arguments(parser):
     parser.add_argument('--warmup_iters', type=float, default=0)  # number of iterations for warmup for scheduler
     parser.add_argument('--lr_decay_iters', type=float, default=4000)  # number of iterations for warmup for scheduler
     parser.add_argument('--lr_decay_rate', type=float, default=0.25)  # number of iterations for warmup for scheduler
+    parser.add_argument('--vanilla', type=bool, default=False)
+    parser.add_argument('--elementwise_affine', type=bool, default=False)
+    parser.add_argument('--learnable_t', type=bool, default=False)
 
     # num of workers 
 
@@ -94,7 +97,7 @@ def add_imle_arguments(parser):
     parser.add_argument('--l2_coef', type=float, default=0.1)  # l2 loss coefficient
 
     # look out
-    parser.add_argument('--force_factor', type=float, default=20)  # sampling factor for imle, i.e., force_factor * len(dataset)
+    parser.add_argument('--force_factor', type=float, default=5)  # sampling factor for imle, i.e., force_factor * len(dataset)
 
     parser.add_argument('--n_mpl', type=int, default=8)  # mapping network layers
 
@@ -128,13 +131,13 @@ def add_imle_arguments(parser):
 
 
     # wandb
-    parser.add_argument('--wandb_name', type=str, default='DiT_mix_check')  # used for wandb
+    parser.add_argument('--wandb_name', type=str, default='DiT_Flowers_local')  # used for wandb
     parser.add_argument('--wandb_project', type=str, default='AdaptiveIMLE')  # used for wandb
     parser.add_argument('--use_wandb', type=int, default=0)
     parser.add_argument('--wandb_mode', type=str, default='online')
 
     # comet.ml
-    parser.add_argument('--use_comet', default=False, type=lambda x: bool(strtobool(x)))
+    parser.add_argument('--use_comet', default=True, type=lambda x: bool(strtobool(x)))
     parser.add_argument('--comet_name', type=str, default='AdaptiveIMLE')  # used in comet.ml
     parser.add_argument('--comet_api_key', type=str, default='')  # comet.ml api key -- leave blank to disable comet.ml
     parser.add_argument('--comet_experiment_key', type=str, default='')

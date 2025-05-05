@@ -35,7 +35,7 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
     imle.zero_grad()
 
     cur_batch_latents = latents
-
+    
     px_z = imle(cur_batch_latents, snoise)
     loss = loss_fn(px_z, targets.permute(0, 3, 1, 2))
     loss.backward()
@@ -152,7 +152,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
         
             comb_dataset = ZippedDataset(split_x, TensorDataset(sampler.selected_latents))
-            data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=0, persistent_workers=False)
+            data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=4, persistent_workers=False)
 
             start_time = time.time()
 
@@ -304,9 +304,9 @@ def main(H=None):
 
         else:
             experiment = Experiment(
-                api_key=H.comet_api_key,
-                project_name="adaptiveimle-ablation",
-                workspace="serchirag",
+                api_key="esx5iX53IbgtEtr4Zj1tkxpYB",
+                project_name="RS-IMLE",
+                workspace="kianhk6",
             )
             experiment.set_name(H.comet_name)
             experiment.log_parameters(H)
