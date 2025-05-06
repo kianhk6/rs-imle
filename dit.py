@@ -222,6 +222,7 @@ class DiT(nn.Module):
             self.t_parameter = nn.Parameter(torch.tensor(499.5, device=self.device))
         else:
             self.t_parameter = None
+        self.log_variance = False
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -307,16 +308,21 @@ class DiT(nn.Module):
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2        
         # x = self.x_embedder(x) # (N, T, D), where T = H * W / patch_size ** 2        
         # Pass through transformer blocks
+        i = 0
         for block in self.blocks:
-            x = block(x, c)  # Blocks are adjusted to handle c=None
+            if self.log_variance:
+                print(f"Block {i}:")
+            x = block(x, c)  # Blocks are adjusted to handle c=None\
+            if self.log_variance:
+                print("\n\n")
+            i += 1
 
-        x = self.final_layer(x, c)  * 2.5 # Final layer adjusted to handle c=None
+        x = self.final_layer(x, c)  # Final layer adjusted to handle c=None
 
         x = self.unpatchify(x)  # Convert back to spatial format (N, out_channels, H, W)
         # # Decode the latent points to images
-        decoded_images = self.vae.decode(x / 0.18215).sample
-
-        return decoded_images
+        # decoded_images = self.vae.decode(x / 0.18215).sample
+        return x
 
 
 #################################################################################

@@ -12,8 +12,8 @@ from dciknn_cuda import DCI, MDCI
 from torch.optim import AdamW
 from helpers.utils import ZippedDataset
 from models import parse_layer_string
-
-
+import torch.nn.functional as F
+from diffusers.models import AutoencoderKL
 
 class Sampler:
     def __init__(self, H, sz, preprocess_fn):
@@ -50,13 +50,9 @@ class Sampler:
         self.selected_dists_l2 = torch.empty([sz], dtype=torch.float32).cuda()
         self.selected_dists_l2[:] = np.inf 
 
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
-        # where you sample: sample something 32 * 32, when passing into network reshape it 
         self.temp_latent_rnds = torch.empty([self.H.imle_db_size, self.H.latent_dim], dtype=torch.float32)
         self.temp_samples = torch.empty([self.H.imle_db_size, H.image_channels, self.H.image_size, self.H.image_size],
                                         dtype=torch.float32)
-
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
 
         self.pool_latents = torch.randn([self.pool_size, H.latent_dim], dtype=torch.float32)
         self.sample_pool_usage = torch.ones([sz], dtype=torch.bool)
@@ -116,6 +112,10 @@ class Sampler:
         self.total_excluded_percentage = 0
         self.dataset_size = sz
         self.db_iter = 0
+        self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").cuda()
+        # Freeze all parameters
+        for param in self.vae.parameters():
+            param.requires_grad = False
 
     def get_projected(self, inp, permute=True):
         if permute:
@@ -179,7 +179,10 @@ class Sampler:
                     if(self.H.use_snoise == True):
                         self.snoise_tmp[i].normal_()
                 snoise = [s[:nm] for s in self.snoise_tmp]
-            px_z = gen(latents, snoise).permute(0, 2, 3, 1)
+            px_z = gen(latents, snoise)
+            # potential mistake here
+            with torch.no_grad():
+                px_z = self.vae.decode(px_z / 0.18215).sample.permute(0, 2, 3, 1)
             xhat = (px_z + 1.0) * 127.5
             xhat = xhat.detach().cpu().numpy()
             xhat = np.minimum(np.maximum(0.0, xhat), 255.0).astype(np.uint8)
@@ -205,56 +208,68 @@ class Sampler:
         res = torch.linalg.norm(inp_feat - tar_feat, dim=1)
         return res
 
-    def calc_loss(self, inp, tar, use_mean=True, logging=False):
-        # inp_feat, inp_shape = self.lpips_net(inp)
-        # tar_feat, _ = self.lpips_net(tar)
-        # res = 0
-        # for i, g_feat in enumerate(inp_feat):
-        #     res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
-        # if use_mean:
-        #     l2_loss = self.l2_loss(inp, tar)
-        #     loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
-        #     if logging:
-        #         return loss, res.mean(), l2_loss.mean()
-        #     else:
-        #         return loss
+    # def calc_loss(self, inp, tar, use_mean=True, logging=False):
+    #     # inp_feat, inp_shape = self.lpips_net(inp)
+    #     # tar_feat, _ = self.lpips_net(tar)
+    #     # res = 0
+    #     # for i, g_feat in enumerate(inp_feat):
+    #     #     res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
+    #     # if use_mean:
+    #     #     l2_loss = self.l2_loss(inp, tar)
+    #     #     loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
+    #     #     if logging:
+    #     #         return loss, res.mean(), l2_loss.mean()
+    #     #     else:
+    #     #         return loss
 
-        # else:
-        #     l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
-        #     loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
-        #     if logging:
-        #         return loss, res.mean(), l2_loss
-        #     else:
-        #         return loss
+    #     # else:
+    #     #     l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
+    #     #     loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
+    #     #     if logging:
+    #     #         return loss, res.mean(), l2_loss
+    #     #     else:
+    #     #         return loss
+    #     inp_feat, inp_shape = self.lpips_net(inp)
+    #     tar_feat, _ = self.lpips_net(tar)
 
-        inp_feat, inp_shape = self.lpips_net(inp)
-        tar_feat, _ = self.lpips_net(tar)
-
-        if use_mean:       
-            l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
-            res = 0
+    #     if use_mean:       
+    #         l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
+    #         res = 0
         
-            for i, g_feat in enumerate(inp_feat):
-                lpips_feature_loss = (g_feat - tar_feat[i]) ** 2
-                res += torch.sum(lpips_feature_loss, dim=1) / (inp_shape[i] ** 2)
+    #         for i, g_feat in enumerate(inp_feat):
+    #             lpips_feature_loss = (g_feat - tar_feat[i]) ** 2
+    #             res += torch.sum(lpips_feature_loss, dim=1) / (inp_shape[i] ** 2)
 
-            loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
-            if logging:
-                return loss, res.mean(), l2_loss.mean()
-            else:
-                return loss
+    #         loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
+    #         if logging:
+    #             return loss, res.mean(), l2_loss.mean()
+    #         else:
+    #             return loss
 
+    #     else:
+    #         res = 0
+    #         for i, g_feat in enumerate(inp_feat):
+    #             res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
+    #         l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
+    #         loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
+    #         if logging:
+    #             return loss, res.mean(), l2_loss
+    #         else:
+    #             return loss
+
+    def calc_loss(self, img, lat_out, *, use_mean: bool = True, logging: bool = False):
+        # per latent error map 
+        mse_map = self.l2_loss(img, lat_out)          # (B, 4, 32, 32)
+
+        # per sample error map 
+        l2_per_sample = mse_map.mean(dim=[1, 2, 3])      # (B,)
+
+        if use_mean:
+            loss = l2_per_sample.mean()                  # scalar
         else:
-            res = 0
-            for i, g_feat in enumerate(inp_feat):
-                res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
-            l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
-            loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
-            if logging:
-                return loss, res.mean(), l2_loss
-            else:
-                return loss
+            loss = l2_per_sample                         # (B,)
 
+        return loss
 
     def calc_dists_existing(self, dataset_tensor, gen, dists=None, dists_lpips = None, dists_l2 = None, latents=None, to_update=None, snoise=None, logging=False):
         if dists is None:
@@ -276,24 +291,17 @@ class Sampler:
 
         for ind, x in enumerate(DataLoader(TensorDataset(dataset_tensor), batch_size=self.H.n_batch)):
             _, target = self.preprocess_fn(x)
+            target = self.vae.encode(target.permute(0, 3, 1, 2)).latent_dist.sample().mul_(0.18215)
             batch_slice = slice(ind * self.H.n_batch, ind * self.H.n_batch + target.shape[0])
             cur_latents = latents[batch_slice]
             cur_snoise = [s[batch_slice] for s in snoise]
             with torch.no_grad():
-                out = gen(cur_latents, cur_snoise)                                
-                if(logging):
-                    dist, dist_lpips, dist_l2 = self.calc_loss(target.permute(0, 3, 1, 2), out, use_mean=False, logging=True)
-                    dists[batch_slice] = torch.squeeze(dist)
-                    dists_lpips[batch_slice] = torch.squeeze(dist_lpips)
-                    dists_l2[batch_slice] = torch.squeeze(dist_l2)
-                else:
-                    dist = self.calc_loss(target.permute(0, 3, 1, 2), out, use_mean=False)
-                    dists[batch_slice] = torch.squeeze(dist)
+                out = gen(cur_latents, cur_snoise)
+                dist = self.calc_loss(target, out, use_mean=False)
+                dists[batch_slice] = torch.squeeze(dist)
         
-        if(logging):
-            return dists, dists_lpips, dists_l2
-        else:
-            return dists
+
+        return dists
     
     def calc_dists_existing_nn(self, dataset_tensor, gen, dists=None, latents=None, to_update=None, snoise=None):
         if dists is None:
@@ -398,15 +406,16 @@ class Sampler:
         for j in range(self.pool_size // self.H.imle_batch):
             batch_slice = slice(j * self.H.imle_batch, (j + 1) * self.H.imle_batch)
             cur_latents = self.pool_latents[batch_slice]
-            
-            cur_snosie = [s[batch_slice] for s in self.snoise_pool]
-            # print("hello " + cur_snosie.shape())
 
+            cur_snosie = [s[batch_slice] for s in self.snoise_pool]
             with torch.no_grad():
                 if(self.H.search_type == 'lpips'):
                     self.pool_samples_proj[batch_slice] = self.get_projected(gen(cur_latents, cur_snosie), False)
                 elif(self.H.search_type == 'l2'):
-                    self.pool_samples_proj[batch_slice] = self.get_l2_feature(gen(cur_latents, cur_snosie), False)
+                    out = gen(cur_latents, cur_snosie)          # out.shape == (16, 4, 32, 32)
+                    out_flat = out.contiguous().view(out.size(0), -1)
+
+                    self.pool_samples_proj[batch_slice] = out_flat
                 else:
                     self.pool_samples_proj[batch_slice] = self.get_combined_feature(gen(cur_latents, cur_snosie), False)
 
