@@ -84,42 +84,231 @@ class DiTBlock(nn.Module):
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
+        # core layers
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn  = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        mlp_hid    = int(hidden_size * mlp_ratio)
+        self.mlp   = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hid,
+            act_layer=lambda: nn.GELU(approximate="tanh"),
+            drop=0
         )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(),
+                                              nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
-    def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        # the eight “flags” where we measure variance
+        self.stat_keys = [
+            "prior_x", "norm1_x", "modulated_msa", "attn_out", "x_after_msa",
+            "norm2_x", "modulated_mlp", "mlp_out",   "final_x"
+        ]
+
+        # initialize accumulators as Python attrs
+        for flag in self.stat_keys:
+            setattr(self, f"total_sum_{flag}",    None)   # will be a Tensor (features,)
+            setattr(self, f"total_sum_sq_{flag}", None)   # will be a Tensor (features,)
+            setattr(self, f"total_images_{flag}", 0)      # scalar
+        
+        self.prev_mean_var = None
+
+    def _update_stats(self, x: torch.Tensor, flag: str):
+        """
+        x: (B, num_patches, embed_dim)
+        """
+        B = x.shape[0]
+        flat = x.reshape(B, -1)              # → (B, features)
+        sum_feat    = flat.sum(dim=0)        # (features,)
+        sum_sq_feat = (flat * flat).sum(dim=0)
+
+        # first batch for this flag?
+        tot = getattr(self, f"total_sum_{flag}")
+        if tot is None:
+            # detach & clone so we don’t track grads
+            setattr(self, f"total_sum_{flag}",    sum_feat.detach().clone())
+            setattr(self, f"total_sum_sq_{flag}", sum_sq_feat.detach().clone())
+        else:
+            getattr(self, f"total_sum_{flag}").add_(sum_feat.detach())
+            getattr(self, f"total_sum_sq_{flag}").add_(sum_sq_feat.detach())
+
+        # increment image count
+        cur = getattr(self, f"total_images_{flag}")
+        setattr(self, f"total_images_{flag}", cur + B)
+    
+    def _output_variance(self, flag: str):
+        S  = getattr(self, f"total_sum_{flag}")     # Tensor(features,)
+        S2 = getattr(self, f"total_sum_sq_{flag}")  # Tensor(features,)
+        N  = getattr(self, f"total_images_{flag}")  # scalar
+
+        # compute per-feature population moments
+        mean_feat    = S  / N
+        mean_sq_feat = S2 / N
+
+        var_feat = mean_sq_feat - mean_feat * mean_feat
+        if(N % 100 == 0):
+            print(f"{flag}: ⟨Var⟩ over {N} images = {var_feat.mean().item():.8f}")
+        mean_var = var_feat.mean().item()
+
+        return mean_var
+    
+    def _report_layer(self, tensor, flag, prev_name, prev_var):
+        """
+        • updates running statistics for `flag`
+        • prints in the form:
+        "<prev: > <prev_var> -> <flag: > <curr_var> (±xx.xx%)"
+        • returns new (name, var) pair for chaining
+        """
+        self._update_stats(tensor, flag)
+        curr_var = self._output_variance(flag)
+        N  = getattr(self, f"total_images_{flag}")  # scalar
+
+        if(N % 1024 == 0):
+            if prev_name is None:                       # first layer
+                print(f"{flag}: {curr_var:.6e}")
+            else:
+                pct = (curr_var - prev_var) / prev_var * 100 if prev_var != 0 else float('nan')
+                print(f"{prev_name}: {prev_var:.6e} -> {flag}: {curr_var:.6e} ({pct:+.2f}%)")
+
+        return flag, curr_var
+
+    def forward(self, x, c, isSample=False):
+        prev_var  = None            # numeric value
+        prev_name = None            # string label
+
+        # ---- collect stats for the raw input (optional) ----
+        if isSample:
+            self._update_stats(x, "prior_x")
+            curr_var = self._output_variance("prior_x")      # scalar
+            # print(f"prior_x: {curr_var:.6e}")                # first layer: no % yet
+            prev_name, prev_var = "prior_x", curr_var
+
+        # -------- get shift/scale/gate params --------
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
+            self.adaLN_modulation(c).chunk(6, dim=1)
+
+        # ---------------------------------------------------------------- MSA branch
+        # 1) LayerNorm
+        norm1_x = self.norm1(x)
+        if isSample:
+            prev_name, prev_var = self._report_layer(norm1_x, "norm1_x", prev_name, prev_var)
+
+        # 2) modulation
+        mod_msa = modulate(norm1_x, shift_msa, scale_msa)
+        if isSample:
+            prev_name, prev_var = self._report_layer(mod_msa, "modulated_msa", prev_name, prev_var)
+
+        # 3) self-attention
+        attn_out = self.attn(mod_msa)
+        if isSample:
+            prev_name, prev_var = self._report_layer(attn_out, "attn_out", prev_name, prev_var)
+
+        # 4) add attn residual
+        x = x + gate_msa.unsqueeze(1) * attn_out
+        if isSample:
+            prev_name, prev_var = self._report_layer(x, "x_after_msa", prev_name, prev_var)
+
+        # ---------------------------------------------------------------- MLP branch
+        # 5) second LayerNorm
+        norm2_x = self.norm2(x)
+        if isSample:
+            prev_name, prev_var = self._report_layer(norm2_x, "norm2_x", prev_name, prev_var)
+
+        # 6) modulation
+        mod_mlp = modulate(norm2_x, shift_mlp, scale_mlp)
+        if isSample:
+            prev_name, prev_var = self._report_layer(mod_mlp, "modulated_mlp", prev_name, prev_var)
+
+        # 7) MLP
+        mlp_out = self.mlp(mod_mlp)
+        if isSample:
+            prev_name, prev_var = self._report_layer(mlp_out, "mlp_out", prev_name, prev_var)
+
+        # 8) add MLP residual  ➜ final_x
+        x = x + gate_mlp.unsqueeze(1) * mlp_out
+        if isSample:
+            self._report_layer(x, "final_x", prev_name, prev_var)
+
         return x
 
 
 class FinalLayer(nn.Module):
     """
-    The final layer of DiT.
+    Final DiT layer with variance tracking and
+    formatted prints like “prior_x -> norm_x (+XX.XX%)”.
     """
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.norm_final       = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear           = nn.Linear(hidden_size, patch_size*patch_size*out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+            nn.Linear(hidden_size, 2*hidden_size, bias=True)
         )
 
-    def forward(self, x, c):
+        self.stat_keys = ["init_x", "norm_x", "modulated_x", "linear_out"]
+        for flag in self.stat_keys:
+            setattr(self, f"total_sum_{flag}",    None)
+            setattr(self, f"total_sum_sq_{flag}", None)
+            setattr(self, f"total_images_{flag}", 0)
+
+    def _update_stats(self, tensor: torch.Tensor, flag: str):
+        B    = tensor.shape[0]
+        flat = tensor.reshape(B, -1)
+        sum_feat    = flat.sum(dim=0)
+        sum_sq_feat = (flat * flat).sum(dim=0)
+
+        tot = getattr(self, f"total_sum_{flag}")
+        if tot is None:
+            setattr(self, f"total_sum_{flag}",    sum_feat.detach().clone())
+            setattr(self, f"total_sum_sq_{flag}", sum_sq_feat.detach().clone())
+        else:
+            getattr(self, f"total_sum_{flag}").add_(sum_feat.detach())
+            getattr(self, f"total_sum_sq_{flag}").add_(sum_sq_feat.detach())
+
+        cur = getattr(self, f"total_images_{flag}")
+        setattr(self, f"total_images_{flag}", cur + B)
+
+    def _get_mean_variance(self, flag: str) -> float:
+        S  = getattr(self, f"total_sum_{flag}")
+        S2 = getattr(self, f"total_sum_sq_{flag}")
+        N  = getattr(self, f"total_images_{flag}")
+
+        mean_feat    = S  / N
+        mean_sq_feat = S2 / N
+        var_feat     = mean_sq_feat - mean_feat * mean_feat
+        return var_feat.mean().item()
+
+    def forward(self, x, c, sampling=False):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
-        return x
+
+        if not sampling:
+            return self.linear(modulate(self.norm_final(x), *self.adaLN_modulation(c).chunk(2, dim=1)))
+
+        # 0) init_x
+        self._update_stats(x, "init_x")
+        init_var = self._get_mean_variance("init_x")
+
+        # 1) norm_x
+        norm_x = self.norm_final(x)
+        self._update_stats(norm_x, "norm_x")
+        norm_var = self._get_mean_variance("norm_x")
+        pct = (norm_var - init_var) / init_var * 100 if init_var != 0 else float('nan')
+        print(f"init_x:    {init_var:.6e} -> norm_x:    {norm_var:.6e} ({pct:+.2f}%)")
+
+        # 2) modulated_x
+        mod_x = modulate(norm_x, shift, scale)
+        self._update_stats(mod_x, "modulated_x")
+        mod_var = self._get_mean_variance("modulated_x")
+        pct = (mod_var - norm_var) / norm_var * 100 if norm_var != 0 else float('nan')
+
+        # 3) linear_out
+        out = self.linear(mod_x)
+        self._update_stats(out, "linear_out")
+        lin_var = self._get_mean_variance("linear_out")
+        pct = (lin_var - mod_var) / mod_var * 100 if mod_var != 0 else float('nan')
+        print(f"modulated_x:{mod_var:.6e} -> linear_out:  {lin_var:.6e} ({pct:+.2f}%)")
+
+        return out
 
 
 class DiT(nn.Module):
@@ -168,18 +357,51 @@ class DiT(nn.Module):
         for param in self.vae.parameters():
             param.requires_grad = False
         self.initialize_weights()
-        self.t_parameter = nn.Parameter(torch.tensor(499.5, device=self.device))
 
         # Set up a learnable time constant if H.learnable_t is True.
         if self.H is not None and self.H.learnable_t == True:
             # # print("Learnable t parameter is set to True.")
             # Create a learnable parameter initialized to 499.5.
-            print("Learnable t parameter is set to True.")
             self.t_parameter = nn.Parameter(torch.tensor(499.5, device=self.device))
         else:
-            print("Learnable t parameter is set to False.")
             self.t_parameter = None
 
+        self.total_sum_unpatch   = None   # 1-D tensor (C*H*W,)
+        self.total_sum_sq_unpatch= None
+        self.total_imgs_unpatch  = 0      # scalar
+
+        self.total_sum_decoded   = None   # 1-D tensor (3*H*W,)
+        self.total_sum_sq_decoded= None
+        self.total_imgs_decoded  = 0
+
+    @staticmethod
+    def _update_global_stats(tensor, total_sum, total_sum_sq, total_N):
+        """
+        tensor : (B, C, H, W)
+        Updates the three running variables *in place* and returns them.
+        """
+        B = tensor.shape[0]
+        flat = tensor.reshape(B, -1)                       # (B, features)
+        sum_feat    = flat.sum(dim=0)                      # (features,)
+        sum_sq_feat = (flat * flat).sum(dim=0)             # (features,)
+
+        if total_sum is None:                  # first call
+            total_sum    = sum_feat.detach().clone()
+            total_sum_sq = sum_sq_feat.detach().clone()
+        else:
+            total_sum    += sum_feat.detach()
+            total_sum_sq += sum_sq_feat.detach()
+
+        total_N += B
+        return total_sum, total_sum_sq, total_N
+
+    @staticmethod
+    def _mean_variance(total_sum, total_sum_sq, total_N):
+        mean     = total_sum / total_N
+        mean_sq  = total_sum_sq / total_N
+        var_feat = mean_sq - mean * mean
+        return var_feat.mean().item()          # scalar
+    
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -227,9 +449,10 @@ class DiT(nn.Module):
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        # # print(f"Unpatchified images shape: {imgs.shape}")
         return imgs
     
-    def forward(self, x, t=None, y=None):
+    def forward(self, x, sampling=False, inle_stuff=None, t=None, y=None,):
         """
         Forward pass of DiT without timestep embeddings.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images).
@@ -242,36 +465,81 @@ class DiT(nn.Module):
         height = width = int((flattened_size // channels) ** 0.5)  # Calculate spatial dimensions
         B, D = x.shape  
 
-        # if you want a constant t for every sample:
-        # t = torch.full((B,), 499.5, device=x.device) 
-
-
-        # # # # Decide on the timestep constant based on whether a learnable parameter has been set.
+        # Decide on the timestep constant based on whether a learnable parameter has been set.
         if self.t_parameter is not None:
             # Use the learnable parameter and expand it to create a tensor of shape (B,).
             t_val = self.t_parameter.expand(B)
         else:
             t_val = torch.randint(0, 999, (x.shape[0],), device=x.device)
 
-        c = self.t_embedder(t_val) 
+        # # print(self.H.elementwise_affine)c
+        # # print(x)
+        # # print(t)
+        c = self.t_embedder(t_val)
 
         # Ensure compatibility
         assert flattened_size == channels * height * width, "Flattened size must be divisible by channels"
 
         # Reshape cur_latents
         x = x.view(batch, channels, height, width)
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2        
+
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2       
+
+ 
         # x = self.x_embedder(x) # (N, T, D), where T = H * W / patch_size ** 2        
         # Pass through transformer blocks
+        i = 0
         for block in self.blocks:
-            x = block(x, c)  # Blocks are adjusted to handle c=None
+            if sampling:
+                print(f"{i}:")
+            x = block(x, c, sampling)  # Blocks are adjusted to handle c=None
+            i += 1
+            if sampling:
+                print("\n\n")
 
-        x = self.final_layer(x, c)  * 2.75 # Final layer adjusted to handle c=None
+        x = self.final_layer(x, c, sampling) * 2.75  # Final layer adjusted to handle c=None
 
         x = self.unpatchify(x)  # Convert back to spatial format (N, out_channels, H, W)
         # # Decode the latent points to images
+
+        if sampling:                          
+            (self.total_sum_unpatch,
+            self.total_sum_sq_unpatch,
+            self.total_imgs_unpatch) = self._update_global_stats(
+                x,
+                self.total_sum_unpatch,
+                self.total_sum_sq_unpatch,
+                self.total_imgs_unpatch
+            )
+            var_lat = self._mean_variance(
+                self.total_sum_unpatch,
+                self.total_sum_sq_unpatch,
+                self.total_imgs_unpatch
+            )
+            print(f"[unpatchify]  Var = {var_lat:.6e}  (N={self.total_imgs_unpatch})")
+
+            
         decoded_images = self.vae.decode(x / 0.18215).sample
 
+        if sampling:                                  # --- variance for decoded ---
+            (self.total_sum_decoded,
+            self.total_sum_sq_decoded,
+            self.total_imgs_decoded) = self._update_global_stats(
+                decoded_images,
+                self.total_sum_decoded,
+                self.total_sum_sq_decoded,
+                self.total_imgs_decoded
+            )
+            var_dec = self._mean_variance(
+                self.total_sum_decoded,
+                self.total_sum_sq_decoded,
+                self.total_imgs_decoded
+            )
+            # percentage change from latent → decoded
+
+            pct = (var_dec - var_lat) / var_lat * 100 if var_lat != 0 else float('nan')
+            print(f"[decoded]     Var = {var_dec:.6e}  (Δ vs latent = {pct:+.2f}%)")
+        
         return decoded_images
 
 

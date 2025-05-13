@@ -50,13 +50,11 @@ class Sampler:
         self.selected_dists_l2 = torch.empty([sz], dtype=torch.float32).cuda()
         self.selected_dists_l2[:] = np.inf 
 
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
-        # where you sample: sample something 32 * 32, when passing into network reshape it 
+
         self.temp_latent_rnds = torch.empty([self.H.imle_db_size, self.H.latent_dim], dtype=torch.float32)
         self.temp_samples = torch.empty([self.H.imle_db_size, H.image_channels, self.H.image_size, self.H.image_size],
                                         dtype=torch.float32)
 
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
 
         self.pool_latents = torch.randn([self.pool_size, H.latent_dim], dtype=torch.float32)
         self.sample_pool_usage = torch.ones([sz], dtype=torch.bool)
@@ -179,7 +177,7 @@ class Sampler:
                     if(self.H.use_snoise == True):
                         self.snoise_tmp[i].normal_()
                 snoise = [s[:nm] for s in self.snoise_tmp]
-            px_z = gen(latents, snoise).permute(0, 2, 3, 1)
+            px_z = gen(latents, False).permute(0, 2, 3, 1)
             xhat = (px_z + 1.0) * 127.5
             xhat = xhat.detach().cpu().numpy()
             xhat = np.minimum(np.maximum(0.0, xhat), 255.0).astype(np.uint8)
@@ -206,27 +204,6 @@ class Sampler:
         return res
 
     def calc_loss(self, inp, tar, use_mean=True, logging=False):
-        # inp_feat, inp_shape = self.lpips_net(inp)
-        # tar_feat, _ = self.lpips_net(tar)
-        # res = 0
-        # for i, g_feat in enumerate(inp_feat):
-        #     res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
-        # if use_mean:
-        #     l2_loss = self.l2_loss(inp, tar)
-        #     loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
-        #     if logging:
-        #         return loss, res.mean(), l2_loss.mean()
-        #     else:
-        #         return loss
-
-        # else:
-        #     l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
-        #     loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
-        #     if logging:
-        #         return loss, res.mean(), l2_loss
-        #     else:
-        #         return loss
-
         inp_feat, inp_shape = self.lpips_net(inp)
         tar_feat, _ = self.lpips_net(tar)
 
@@ -280,7 +257,7 @@ class Sampler:
             cur_latents = latents[batch_slice]
             cur_snoise = [s[batch_slice] for s in snoise]
             with torch.no_grad():
-                out = gen(cur_latents, cur_snoise)                                
+                out = gen(cur_latents, False)                                
                 if(logging):
                     dist, dist_lpips, dist_l2 = self.calc_loss(target.permute(0, 3, 1, 2), out, use_mean=False, logging=True)
                     dists[batch_slice] = torch.squeeze(dist)
@@ -339,7 +316,7 @@ class Sampler:
                 cur_latents = self.temp_latent_rnds[batch_slice]
                 cur_snoise = [x[batch_slice] for x in self.snoise_tmp]
                 with torch.no_grad():
-                    self.temp_samples[batch_slice] = gen(cur_latents, cur_snoise)
+                    self.temp_samples[batch_slice] = gen(cur_latents, False)
                     if(self.H.search_type == 'lpips'):
                         self.temp_samples_proj[batch_slice] = self.get_projected(self.temp_samples[batch_slice], False)
                     elif(self.H.search_type == 'l2'):
@@ -352,8 +329,6 @@ class Sampler:
                 gen.module.dci_db = MDCI(self.temp_samples_proj.shape[1], num_comp_indices=self.H.num_comp_indices,
                                             num_simp_indices=self.H.num_simp_indices, devices=[i for i in range(device_count)], ts=device_count)
 
-                # gen.module.dci_db = DCI(self.temp_samples_proj.shape[1], num_comp_indices=self.H.num_comp_indices,
-                                            # num_simp_indices=self.H.num_simp_indices)
             gen.module.dci_db.add(self.temp_samples_proj)
 
             t0 = time.time()
@@ -389,7 +364,6 @@ class Sampler:
                 dataset)) * 100))
 
     def resample_pool(self, gen, ds):
-        # self.init_projection(ds)
         self.pool_latents.normal_()
         for i in range(len(self.res)):
             if(self.H.use_snoise == True):
@@ -400,13 +374,12 @@ class Sampler:
             cur_latents = self.pool_latents[batch_slice]
             
             cur_snosie = [s[batch_slice] for s in self.snoise_pool]
-            # print("hello " + cur_snosie.shape())
 
             with torch.no_grad():
                 if(self.H.search_type == 'lpips'):
                     self.pool_samples_proj[batch_slice] = self.get_projected(gen(cur_latents, cur_snosie), False)
                 elif(self.H.search_type == 'l2'):
-                    self.pool_samples_proj[batch_slice] = self.get_l2_feature(gen(cur_latents, cur_snosie), False)
+                    self.pool_samples_proj[batch_slice] = self.get_l2_feature(gen(cur_latents, True), False)
                 else:
                     self.pool_samples_proj[batch_slice] = self.get_combined_feature(gen(cur_latents, cur_snosie), False)
 
@@ -426,8 +399,6 @@ class Sampler:
 
         self.selected_dists_tmp[:] = np.inf
         self.sample_pool_usage[to_update] = True
-
-        ## removing samples too close
 
         total_rejected = 0
 

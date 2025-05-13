@@ -49,6 +49,7 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
 
 
 def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, logprint, experiment = None):
+    print("Learnable t: ", H.learnable_t)
     subset_len = len(data_train)
     if H.subset_len != -1:
         subset_len = H.subset_len

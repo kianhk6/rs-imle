@@ -7,8 +7,9 @@ from helpers.imle_helpers import get_1x1, get_3x3, draw_gaussian_diag_samples, g
 from collections import defaultdict
 import numpy as np
 import itertools
-from dit import DiT_S_2
+# from dit import DiT_S_2
 from dit_affine import DiT_S_2_affine
+from dit import DiT_S_2
 
 class Block(nn.Module):
     def __init__(self, in_width, middle_width, out_width, down_rate=None, residual=False, use_3x3=True, zero_last=False):
@@ -141,8 +142,9 @@ class IMLE(nn.Module):
                 self.decoder = DiT_S_2_affine()
             else:
                 self.decoder = DiT_S_2(H=H)
+                # self.decoder = DiT_S_2(H=H)
             
 
-    def forward(self, latents, spatial_noise=None, input_is_w=False):
-        return self.decoder.forward(latents, spatial_noise, input_is_w)
+    def forward(self, latents, sampling=False, spatial_noise=None, input_is_w=False):
+        return self.decoder(latents)
 
