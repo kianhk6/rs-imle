@@ -417,6 +417,7 @@ class Sampler:
             return
         
         to_update = to_update.cpu()
+        print(to_update)
 
         t1 = time.time()
         if torch.any(self.sample_pool_usage[to_update]):
@@ -504,3 +505,106 @@ class Sampler:
         self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
 
         print(f'Force resampling took {time.time() - t1}')
+    
+    def imle_sample_force_conditional(self, dataset, gen, to_update=None):
+        """
+        For each real sample index in `to_update`, generate `force_factor` candidates
+        and select the nearest only within that sample's own candidate group.
+
+        This avoids global mixing and enforces per-data matching.
+        """
+        if to_update is None:
+            to_update = self.entire_ds
+        if to_update.shape[0] == 0:
+            return
+
+        # Ensure CPU tensor for indexing and also create a CUDA copy when updating CUDA tensors
+        to_update = to_update.cpu()
+
+        ff = max(1, int(self.H.force_factor))
+        # Keep candidate batch within the same memory budget as imle_db_size
+        chunk_size = max(1, self.H.imle_db_size // ff)
+
+        # Reset temporary distances on the subset we are updating
+        self.selected_dists_tmp[to_update.cuda()] = float('inf')
+
+        t1 = time.time()
+        micro = max(1, int(getattr(self.H, 'cond_micro_batch', 16)))
+        with torch.no_grad():
+            for start in range(0, to_update.shape[0], chunk_size):
+                end = min(start + chunk_size, to_update.shape[0])
+                indices = to_update[start:end]  # CPU LongTensor
+                if indices.numel() == 0:
+                    continue
+
+                cur_chunk = indices.shape[0]
+                real_proj_chunk = self.dataset_proj[indices].cuda()
+
+                # For each sample, stream its group in micro-batches
+                for i in range(cur_chunk):
+                    best_dist = float('inf')
+                    best_latent = None
+                    best_snoise = None
+                    accepted = False
+
+                    rp = real_proj_chunk[i:i+1]  # [1, d]
+
+                    for k in range(0, ff, micro):
+                        m = min(micro, ff - k)
+                        z = torch.randn(m, self.H.latent_dim, dtype=torch.float32)
+                        if self.H.use_snoise:
+                            s_micro = [torch.randn(m, 1, s, s, dtype=torch.float32) for s in self.res]
+                        else:
+                            s_micro = [torch.zeros(m, 1, s, s, dtype=torch.float32) for s in self.res]
+
+                        out = gen(z, s_micro)
+
+                        if (self.H.search_type == 'lpips'):
+                            p = self.get_projected(out, False)
+                        elif (self.H.search_type == 'l2'):
+                            p = self.get_l2_feature(out, False)
+                        else:
+                            p = self.get_combined_feature(out, False)
+
+                        dists = torch.linalg.norm(p - rp, dim=1)
+
+                        if getattr(self.H, 'use_rsimle', False):
+                            reject_mask = dists < self.H.eps_radius
+                            if torch.all(reject_mask):
+                                del out, p, dists
+                                continue
+                            dists = dists.masked_fill(reject_mask, float('inf'))
+
+                        j = torch.argmin(dists).item()
+                        d_best = dists[j].item()
+                        if d_best != float('inf') and d_best < best_dist:
+                            best_dist = d_best
+                            best_latent = z[j].clone()
+                            best_snoise = [s[j].clone() for s in s_micro]
+                            accepted = True
+
+                        del out, p, dists
+
+                    if not accepted:
+                        raise RuntimeError(
+                            f"All {ff} candidates rejected for sample index {indices[i].item()} at eps_radius={self.H.eps_radius}"
+                        )
+
+                    idx = indices[i]
+                    self.selected_dists_tmp[idx.cuda()] = torch.tensor(best_dist, device='cuda')
+                    self.selected_latents_tmp[idx] = best_latent
+                    for j in range(len(self.res)):
+                        self.selected_snoise[j][idx] = best_snoise[j]
+
+        # Commit updates
+        self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
+
+        # Track exclusion metrics for logging consistency
+        # self.total_excluded = total_rejected
+        # if processed_candidates > 0:
+        #     self.total_excluded_percentage = (total_rejected * 1.0 / processed_candidates) * 100
+        # else:
+        #     self.total_excluded_percentage = 0
+
+        print(f'Conditional force resampling took {time.time() - t1}')
+

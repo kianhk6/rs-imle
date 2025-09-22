@@ -93,6 +93,11 @@ def add_imle_arguments(parser):
     parser.add_argument('--lpips_coef', type=float, default=1.0)  # lpips loss coefficient
     parser.add_argument('--l2_coef', type=float, default=0.1)  # l2 loss coefficient
 
+    # Conditional per-sample candidate matching
+    parser.add_argument('--conditional_force', default=False, type=lambda x: bool(strtobool(x)))
+    parser.add_argument('--conditional_force_faiss', default=False, type=lambda x: bool(strtobool(x)))
+    parser.add_argument('--cond_micro_batch', type=int, default=16)
+    
     # look out
     parser.add_argument('--force_factor', type=float, default=20)  # sampling factor for imle, i.e., force_factor * len(dataset)
 

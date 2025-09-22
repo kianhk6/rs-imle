@@ -28,6 +28,7 @@ from visual.utils import (generate_and_save, generate_for_NN,
                           generate_images_initial,
                           get_sample_for_visualization)
 from helpers.improved_precision_recall import compute_prec_recall
+from diffusers.models import AutoencoderKL
 
 
 def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer, loss_fn):
@@ -96,6 +97,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             updated_too_much = last_updated >= H.imle_force_resample
             in_threshold = torch.logical_and(dists_in_threshold, updated_enough)
 
+            # everything gets updated when adapted is false
             if(H.use_adaptive):
                 all_conditions = torch.logical_or(in_threshold, updated_too_much)
             else:
@@ -127,9 +129,10 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
 
             change_thresholds[to_update] = sampler.selected_dists[to_update].clone() * (1 - H.change_coef)
-
+            
+            print("imle sample force is called! ----------------------------------")
             sampler.imle_sample_force(split_x_tensor, imle, to_update)
-
+            
             # if (to_update.shape[0] > 0):
             #     print("Saving latents")
             #     save_latents_latest(H, split_ind, sampler.selected_latents, name=str(epoch))
@@ -291,6 +294,7 @@ def main(H=None):
     if not H:
         H = H_cur
     H, data_train, data_valid_or_test, preprocess_fn = set_up_data(H)
+    
     imle, ema_imle = load_imle(H, logprint)
 
     if H.use_comet and H.comet_api_key:
@@ -305,8 +309,8 @@ def main(H=None):
         else:
             experiment = Experiment(
                 api_key=H.comet_api_key,
-                project_name="adaptiveimle-ablation",
-                workspace="serchirag",
+                project_name="flow-model-imle",
+                workspace="kianhk6",
             )
             experiment.set_name(H.comet_name)
             experiment.log_parameters(H)

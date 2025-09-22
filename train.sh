@@ -1,6 +1,13 @@
-## Script to train the model on FFHQ dataset
-
-python train.py --hps fewshot \
-    --save_dir ./new-vanilla-results/ffhq/ \
-    --data_root ./datasets/ffhq/ \
-    --lr 0.0002 
+CUDA_VISIBLE_DEVICES=0 python train.py \
+    --hps fewshot \
+    --save_dir ./home/kha98/rs-imle/vanilla-run/debug\
+    --data_root /home/kha98/rs-imle/datasets/ffhq \
+    --force_factor 5 \
+    --imle_staleness 5 \
+    --imle_force_resample 5 \
+    --lr 0.0002 \
+    --comet_api_key 'esx5iX53IbgtEtr4Zj1tkxpYB' \
+    --comet_name 'flow-model-imle' \
+    --use_comet False \
+    --use_snoise False \
+    --conditional_force_faiss False
