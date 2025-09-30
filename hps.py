@@ -58,6 +58,7 @@ def add_imle_arguments(parser):
     parser.add_argument('--restore_scheduler_path', type=str, default=None)  # restore optimizer from scheduler
     parser.add_argument('--restore_latent_path', type=str, default=None)  # restore nearest neighbour latent codes from checkpoint
     parser.add_argument('--restore_threshold_path', type=str, default=None)  # restore nearest neighbour thresholds, i.e., \tau_i, from checkpoint
+    parser.add_argument('--condition_path', type=str, default=None)  # path to .pt file containing condition tensors (same type as noise)
     parser.add_argument('--ema_rate', type=float, default=0.999)  # exponential moving average rate
     parser.add_argument('--warmup_iters', type=float, default=0)  # number of iterations for warmup for scheduler
     parser.add_argument('--lr_decay_iters', type=float, default=4000)  # number of iterations for warmup for scheduler

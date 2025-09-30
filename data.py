@@ -110,7 +110,29 @@ def set_up_data(H):
         # out.add_(shift_loss).mul_(scale_loss)
         return inp, inp
 
-    return H, train_data, valid_data, preprocess_func
+    # Load condition tensors if condition_path is provided
+    condition_data = None
+    if H.condition_path and os.path.exists(H.condition_path):
+        print(f"Loading condition tensors from {H.condition_path}")
+        condition_tensors = torch.load(H.condition_path)
+        if isinstance(condition_tensors, torch.Tensor):
+            # Convert to TensorDataset to match data_train format
+            condition_data = TensorDataset(condition_tensors)
+        elif isinstance(condition_tensors, (list, tuple)):
+            # If it's a list/tuple of tensors (like snoise), create TensorDataset
+            condition_data = TensorDataset(*condition_tensors)
+        else:
+            raise ValueError(f"Unsupported condition tensor format: {type(condition_tensors)}")
+        
+        print(f"Loaded condition data with {len(condition_data)} samples")
+        print(f"Condition data type: {type(condition_data)}")
+        if hasattr(condition_tensors, 'shape'):
+            print(f"Condition tensor shape: {condition_tensors.shape}")
+    else:
+        if H.condition_path:
+            print(f"Warning: condition_path {H.condition_path} not found, proceeding without condition data")
+
+    return H, train_data, valid_data, preprocess_func, condition_data
 
 
 def mkdir_p(path):

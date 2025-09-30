@@ -30,14 +30,26 @@ from visual.utils import (generate_and_save, generate_for_NN,
 from helpers.improved_precision_recall import compute_prec_recall
 from diffusers.models import AutoencoderKL
 
-
-def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer, loss_fn):
+# To Do: this one is for the selected latents 
+def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer, loss_fn, condition_data=None, batch_conditions=None, batch_condition_indices=None):
     t0 = time.time()
     imle.zero_grad()
 
     cur_batch_latents = latents
-
-    px_z = imle(cur_batch_latents, snoise)
+    print("loss inference: ", batch_conditions)
+    if batch_condition_indices is not None:
+        if torch.is_tensor(batch_condition_indices):
+            print("Condition indices passed to training_step_imle:", batch_condition_indices.tolist())
+        else:
+            print("Condition indices passed to training_step_imle:", batch_condition_indices)
+    # Pass condition data to the model if available
+    if batch_conditions is not None:
+        if hasattr(H, 'debug_return_condition') and H.debug_return_condition:
+            px_z, debug_info = imle(cur_batch_latents, snoise, condition_data=batch_conditions, return_condition=True)
+        else:
+            px_z = imle(cur_batch_latents, snoise, condition_data=batch_conditions)
+    else:
+        px_z = imle(cur_batch_latents, snoise)
     loss = loss_fn(px_z, targets.permute(0, 3, 1, 2))
     loss.backward()
     optimizer.step()
@@ -49,13 +61,20 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
     return stats
 
 
-def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, logprint, experiment = None):
+def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, logprint, experiment = None, condition_data = None):
     subset_len = len(data_train)
     if H.subset_len != -1:
         subset_len = H.subset_len
     for data_train in DataLoader(data_train, batch_size=subset_len):
         data_train = TensorDataset(data_train[0])
         break
+
+    if condition_data is not None:
+        for condition_data in DataLoader(condition_data, batch_size=subset_len):
+            condition_data = TensorDataset(condition_data[0])
+            break
+    else:
+        print("No condition data provided, training without conditions")
 
     optimizer, scheduler, _, iterate, starting_epoch = load_opt(H, imle, logprint)
 
@@ -68,8 +87,16 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
     subset_len = H.subset_len
     if subset_len == -1:
         subset_len = len(data_train)
-
-    sampler = Sampler(H, subset_len, preprocess_fn)
+    
+    if condition_data is not None:
+        sampler = Sampler(
+            H,
+            subset_len,
+            preprocess_fn,
+            condition_config={"condition_tensor": condition_data},
+        )
+    else:
+        sampler = Sampler(H, subset_len, preprocess_fn)
 
     last_updated = torch.zeros(subset_len, dtype=torch.int16).cuda()
     times_updated = torch.zeros(subset_len, dtype=torch.int8).cuda()
@@ -84,6 +111,26 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
         sampler.init_projection(split_x_tensor)
         viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
 
+        # Extract corresponding split from condition_data
+        split_condition_data = None
+        if condition_data is not None:
+            # Get the same indices that correspond to this split
+            start_idx = split_ind * subset_len
+            end_idx = min(start_idx + subset_len, len(condition_data))
+            split_indices = torch.arange(start_idx, end_idx)
+            
+            # Extract the condition data for this split
+            split_conditions = []
+            for idx in split_indices:
+                condition_sample = condition_data[idx]
+                if isinstance(condition_sample, tuple):
+                    split_conditions.append(condition_sample[0])
+                else:
+                    split_conditions.append(condition_sample)
+            split_condition_data = torch.stack(split_conditions).cuda()
+            
+            print(f'Split {split_ind}: data shape {split_x_tensor.shape}, condition shape {split_condition_data.shape}')
+
         print('Outer batch - {}'.format(split_ind, len(split_x)))
 
         while (epoch < H.num_epochs):
@@ -91,7 +138,15 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             epoch += 1
             last_updated[:] = last_updated + 1
 
-            sampler.selected_dists[:] = sampler.calc_dists_existing(split_x_tensor, imle, dists=sampler.selected_dists)
+            if split_condition_data is not None:
+                sampler.selected_dists[:] = sampler.calc_dists_existing(
+                    split_x_tensor,
+                    imle,
+                    dists=sampler.selected_dists,
+                    conditions=(split_condition_data, split_indices.cuda())
+                )
+            else:
+                sampler.selected_dists[:] = sampler.calc_dists_existing(split_x_tensor, imle, dists=sampler.selected_dists)
             dists_in_threshold = sampler.selected_dists < change_thresholds
             updated_enough = last_updated >= H.imle_staleness
             updated_too_much = last_updated >= H.imle_force_resample
@@ -130,13 +185,12 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
             change_thresholds[to_update] = sampler.selected_dists[to_update].clone() * (1 - H.change_coef)
             
-            print("imle sample force is called! ----------------------------------")
-            sampler.imle_sample_force(split_x_tensor, imle, to_update)
+            # Pass the corresponding condition data split to imle_sample_force
+            if split_condition_data is not None:
+                sampler.imle_sample_force(split_x_tensor, imle, to_update, condition_data=split_condition_data)
+            else:
+                sampler.imle_sample_force(split_x_tensor, imle, to_update)
             
-            # if (to_update.shape[0] > 0):
-            #     print("Saving latents")
-            #     save_latents_latest(H, split_ind, sampler.selected_latents, name=str(epoch))
-
 
             to_update = to_update.cpu()
             last_updated[to_update] = 0
@@ -146,14 +200,24 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             save_latents_latest(H, split_ind, change_thresholds, name='threshold_latest')
 
             if to_update.shape[0] >= H.num_images_visualize + 8:
-                latents = sampler.selected_latents[to_update[:H.num_images_visualize]]
+                vis_idx = to_update[:H.num_images_visualize]
+                latents = sampler.selected_latents[vis_idx]
+                cond_vis = None
+                if split_condition_data is not None:
+                    cond_vis = split_condition_data[vis_idx]
                 with torch.no_grad():
-                    generate_for_NN(sampler, split_x_tensor[to_update[:H.num_images_visualize]], latents,
-                                    [s[to_update[:H.num_images_visualize]] for s in sampler.selected_snoise],
-                                    viz_batch_original.shape, imle,
-                                    f'{H.save_dir}/NN-samples_{epoch}-imle.png', logprint)
+                    generate_for_NN(
+                        sampler,
+                        split_x_tensor[vis_idx],
+                        latents,
+                        [s[vis_idx] for s in sampler.selected_snoise],
+                        viz_batch_original.shape,
+                        imle,
+                        f'{H.save_dir}/NN-samples_{epoch}-imle.png',
+                        logprint,
+                        condition_data=cond_vis,
+                    )
 
-        
             comb_dataset = ZippedDataset(split_x, TensorDataset(sampler.selected_latents))
             data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=0, persistent_workers=False)
 
@@ -164,15 +228,38 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 latents = cur[1][0]
                 _, target = preprocess_fn(x)
                 
-                # if(H.use_snoise):
+                # Get condition data for this batch
+                batch_conditions = None
+                if condition_data is not None:
+                    # condition_data is now a TensorDataset, so we access it like data_train
+                    batch_conditions = []
+                    for idx in indices:
+                        condition_sample = condition_data[idx]
+                        if isinstance(condition_sample, tuple):
+                            batch_conditions.append(condition_sample[0])  # Get the tensor from the tuple
+                        else:
+                            batch_conditions.append(condition_sample)
+                    batch_conditions = torch.stack(batch_conditions).cuda()
+                
                 cur_snoise = [s[indices] for s in sampler.selected_snoise]
 
                 for i in range(len(H.res)):
                     cur_snoise[i].zero_()
-                # else:
-                #     cur_snoise = [s[indices] for s in sampler.selected_snoise]
 
-                stat = training_step_imle(H, target.shape[0], target, latents, cur_snoise, imle, ema_imle, optimizer, sampler.calc_loss)
+                stat = training_step_imle(
+                    H,
+                    target.shape[0],
+                    target,
+                    latents,
+                    cur_snoise,
+                    imle,
+                    ema_imle,
+                    optimizer,
+                    sampler.calc_loss,
+                    condition_data,
+                    batch_conditions,
+                    batch_condition_indices=indices,
+                )
                 stats.append(stat)
 
                 if(iterate <= H.warmup_iters):
@@ -181,11 +268,17 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
                 if iterate % H.iters_per_images == 0:
                     with torch.no_grad():
-                        generate_images_initial(H, sampler, viz_batch_original,
-                                                sampler.selected_latents[0: H.num_images_visualize],
-                                                [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
-                                                viz_batch_original.shape, imle, ema_imle,
-                                                f'{H.save_dir}/samples-{iterate}.png', logprint, experiment)
+                        cond_vis2 = None
+                        if split_condition_data is not None:
+                            cond_vis2 = split_condition_data[0: H.num_images_visualize]
+                        generate_images_initial(
+                            H, sampler, viz_batch_original,
+                            sampler.selected_latents[0: H.num_images_visualize],
+                            [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
+                            viz_batch_original.shape, imle, ema_imle,
+                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment,
+                            condition_data=cond_vis2,
+                        )
 
                 iterate += 1
                 if iterate % H.iters_per_save == 0:
@@ -216,7 +309,9 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                                                                             dists=cur_dists,  
                                                                                             dists_lpips=cur_dists_lpips,
                                                                                             dists_l2=cur_dists_l2, 
-                                                                                            logging=True)
+                                                                                            logging=True,
+                                                                                            conditions=split_condition_data,
+                                                                                            expect_condition_indices=False)
 
             # torch.save(cur_dists, f'{H.save_dir}/latent/dists-{epoch}.npy')
                     
@@ -236,6 +331,18 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 'total_excluded': sampler.total_excluded,
                 'total_excluded_percentage': sampler.total_excluded_percentage,
             }
+            
+            # Add condition data metrics if available
+            if condition_data is not None:
+                metrics['total_samples'] = len(condition_data)
+                metrics['condition_data_type'] = str(type(condition_data))
+                # Get shape from a sample
+                sample_condition = condition_data[0]
+                if isinstance(sample_condition, tuple):
+                    metrics['condition_shape'] = list(sample_condition[0].shape)
+                else:
+                    metrics['condition_shape'] = list(sample_condition.shape)
+                metrics['using_condition_vocabulary'] = True
 
             if (epoch > 0 and epoch % H.fid_freq == 0):
                 print("Learning rate: ", optimizer.param_groups[0]['lr'])
@@ -267,11 +374,17 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
             if epoch % 50 == 0:
                 with torch.no_grad():
-                    generate_images_initial(H, sampler, viz_batch_original,
-                                            sampler.selected_latents[0: H.num_images_visualize],
-                                            [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
-                                            viz_batch_original.shape, imle, ema_imle,
-                                            f'{H.save_dir}/latest.png', logprint, experiment)                    
+                    cond_vis2 = None
+                    if split_condition_data is not None:
+                        cond_vis2 = split_condition_data[0: H.num_images_visualize]
+                    generate_images_initial(
+                        H, sampler, viz_batch_original,
+                        sampler.selected_latents[0: H.num_images_visualize],
+                        [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
+                        viz_batch_original.shape, imle, ema_imle,
+                        f'{H.save_dir}/latest.png', logprint, experiment,
+                        condition_data=cond_vis2,
+                    )                    
                 # Save model checkpoint at the 50th epoch
                 model_checkpoint_path = f'{H.save_dir}/model_epoch_{epoch}.pt'
                 torch.save({
@@ -293,7 +406,7 @@ def main(H=None):
     H_cur, logprint = set_up_hyperparams()
     if not H:
         H = H_cur
-    H, data_train, data_valid_or_test, preprocess_fn = set_up_data(H)
+    H, data_train, data_valid_or_test, preprocess_fn, condition_data = set_up_data(H)
     
     imle, ema_imle = load_imle(H, logprint)
 
@@ -398,7 +511,7 @@ def main(H=None):
 
     elif H.mode == 'train':
         print(H)
-        train_loop_imle(H, data_train, data_valid_or_test, preprocess_fn, imle, ema_imle, logprint, experiment)
+        train_loop_imle(H, data_train, data_valid_or_test, preprocess_fn, imle, ema_imle, logprint, experiment, condition_data)
 
     elif H.mode == 'ppl':
         sampler = Sampler(H, H.subset_len, preprocess_fn)
