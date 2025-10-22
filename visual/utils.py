@@ -26,10 +26,10 @@ def get_sample_for_visualization(data, preprocess_fn, num, dataset):
 
 
 
-def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint):
+def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None):
     mb = shape[0]
     initial = initial[:mb].cuda()
-    nns = sampler.sample(initial, ema_imle, snoise)
+    nns = sampler.sample(initial, ema_imle, snoise, condition_data=condition_data)
     batches = [orig[:mb], nns]
     n_rows = len(batches)
     im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
@@ -39,10 +39,13 @@ def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logp
     imageio.imwrite(fname, im)
 
 
-def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None):
+def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None):
     mb = shape[0]
     initial = initial[:mb]
-    batches = [orig[:mb], sampler.sample(initial, imle, snoise)]
+    batches = [orig[:mb]]
+    # Row 1: with matching condition slice if provided
+    first_cond = condition_data[:mb] if condition_data is not None else None
+    batches.append(sampler.sample(initial, imle, snoise, condition_data=first_cond))
 
     temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
     for t in range(H.num_rows_visualize + 4):
@@ -51,27 +54,19 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
         else:
             tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-        batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
-
-    # if(H.use_snoise == True):
-    #     tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
-    # else:
-    #     tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-    # batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
-
-    # if(H.use_snoise == True):
-    #     tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
-    # else:
-    #     tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-    # batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
-
-    # tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-    # batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
-
-    # tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-    # temp_latent_rnds.normal_()
-    # batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
-
+        # Subsequent rows: step through next condition windows of size mb
+        if condition_data is not None:
+            start = (t + 1) * mb
+            end = start + mb
+            if condition_data.shape[0] >= end:
+                cur_cond = condition_data[start:end]
+            else:
+                idx = torch.arange(start, end) % max(1, condition_data.shape[0])
+                cur_cond = condition_data[idx]
+        else:
+            cur_cond = None
+        batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=cur_cond))
+        
     n_rows = len(batches)
     im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
         [n_rows * shape[1], mb * shape[2], 3])

@@ -8,7 +8,7 @@ from collections import defaultdict
 import numpy as np
 import itertools
 from dit import DiT_S_2
-from unet.unet import FixedUNet32
+from unet.unet import UNetModelWrapper
 
 class Block(nn.Module):
     def __init__(self, in_width, middle_width, out_width, down_rate=None, residual=False, use_3x3=True, zero_last=False):
@@ -137,26 +137,39 @@ class IMLE(nn.Module):
         self.img_size = H.image_size
         self.latent_channels = 4
         # self.decoder = Decoder(H)
-        self.decoder = FixedUNet32()
+        # self.decoder = FixedUNet32()
 
         # self.decoder = DiT_S_2()
         # self.decoder = Decoder(H)
-        # if H.use_UNET_latent:
-        #     self.decoder = UNet2DModel(
-        #     sample_size=32,  # the expected spatial dimensions of the input image patches
-        #     in_channels=3,   # number of input channels (e.g., 3 for RGB images)
-        #     out_channels=3,  # number of output channels
-        #     layers_per_block=2,
-        #     block_out_channels=(64, 128, 256, 512),
-        #     down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
-        #     up_block_types=("UpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D"))
+        in_ch = 4
+        cond_ch = in_ch
+        total_in = in_ch + cond_ch  # 8
+
+        self.decoder = UNetModelWrapper(
+            dim=(total_in, H.image_size // 8, H.image_size // 8),
+            num_res_blocks=2,
+            num_channels=128,
+            channel_mult=[1, 2, 2, 2],
+            num_heads=4,
+            num_head_channels=64,
+            attention_resolutions="16",
+            dropout=0.1,
+            # concat-only: disable internal conditioning paths
+            cond_channels=0,
+            cond_concat=False,
+            cond_resblock_mode="none",
+        )
 
 
 
-    def forward(self, latents, spatial_noise=None, input_is_w=False):
+    def forward(self, latents, spatial_noise=None, input_is_w=False, condition_data=None, condition_indices=None, return_condition=False):
         if latents.ndim != 4:
             batch_size = latents.shape[0]
             latent_side = self.img_size // 8
             latents = latents.reshape(batch_size, self.latent_channels, latent_side, latent_side)
-        return self.decoder.forward(latents)
-    
+        x_cat = torch.cat([latents, condition_data], dim=1)
+        out = self.decoder(x_cat)
+        if return_condition:
+            # Return the raw condition_data and optional indices for debugging
+            return out, { 'condition_data': condition_data, 'condition_indices': condition_indices }
+        return out
