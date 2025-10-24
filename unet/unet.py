@@ -61,13 +61,11 @@ class TimestepBlock(nn.Module):
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """A sequential module that passes timestep embeddings to the children that support it as an
-    extra input. Optionally also threads a spatial condition to ResBlocks."""
+    extra input."""
 
-    def forward(self, x, emb, cond=None):
+    def forward(self, x, emb):
         for layer in self:
-            if isinstance(layer, ResBlock):
-                x = layer(x, emb, cond)
-            elif isinstance(layer, TimestepBlock):
+            if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             else:
                 x = layer(x)
@@ -157,8 +155,6 @@ class ResBlock(TimestepBlock):
         use_checkpoint=False,
         up=False,
         down=False,
-        cond_channels=None,
-        cond_resblock_mode="add",
     ):
         super().__init__()
         self.channels = channels
@@ -168,10 +164,6 @@ class ResBlock(TimestepBlock):
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
-        self.dims = dims
-        # Spatial conditioning configuration
-        self.cond_channels = cond_channels if cond_channels is not None else 0
-        self.cond_resblock_mode = cond_resblock_mode
 
         self.in_layers = nn.Sequential(
             normalization(channels),
@@ -197,17 +189,11 @@ class ResBlock(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
-        # Optional spatial conditioning projection (1x1 conv)
-        if self.cond_channels > 0:
-            cond_out_ch = 2 * self.out_channels if self.cond_resblock_mode == "film" else self.out_channels
-            self.cond_proj = conv_nd(dims, self.cond_channels, cond_out_ch, 1)
-        else:
-            self.cond_proj = None
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
+            conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1),
         )
 
         if self.out_channels == channels:
@@ -217,17 +203,16 @@ class ResBlock(TimestepBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb, cond=None):
+    def forward(self, x, emb):
         """Apply the block to a Tensor, conditioned on a timestep embedding.
 
         :param x: an [N x C x ...] Tensor of features.
-        :param emb: an [N x emb_channels] Tensor of timestep embeddings. Can be None.
-        :param cond: an optional spatial condition [N x Cc x ...]. Can be None.
+        :param emb: an [N x emb_channels] Tensor of timestep embeddings with conditions.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        return checkpoint(self._forward, (x, emb, cond), self.parameters(), self.use_checkpoint)
+        return checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
 
-    def _forward(self, x, emb, cond=None):
+    def _forward(self, x, emb):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -236,49 +221,17 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        # Optional timestep/class embedding path (kept for compatibility with other usages)
-        emb_out = None
-        if emb is not None:
-            emb_out = emb
-            while len(emb_out.shape) < len(h.shape):
-                emb_out = emb_out[..., None]
-
-        # Since its spacial we do interpolation 
-        cond_out = None
-        if self.cond_proj is not None and cond is not None:
-            # Resize spatial condition to match current resolution
-            if self.dims == 1:
-                target_size = h.shape[-1]
-                cond_resized = F.interpolate(cond, size=target_size, mode="nearest")
-            elif self.dims == 2:
-                target_size = (h.shape[-2], h.shape[-1])
-                cond_resized = F.interpolate(cond, size=target_size, mode="bilinear", align_corners=False)
-            else:
-                target_size = (h.shape[-3], h.shape[-2], h.shape[-1])
-                cond_resized = F.interpolate(cond, size=target_size, mode="trilinear", align_corners=False)
-            cond_out = self.cond_proj(cond_resized).type(h.dtype)
-
-        if cond_out is not None:
-            # Use spatial conditioning
-            if self.cond_resblock_mode == "film":
-                out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-                scale, shift = th.chunk(cond_out, 2, dim=1)
-                h = out_norm(h) * (1 + scale) + shift
-                h = out_rest(h)
-            else:
-                h = h + cond_out
-                h = self.out_layers(h)
+        emb_out = self.emb_layers(emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
+        if self.use_scale_shift_norm:
+            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+            scale, shift = th.chunk(emb_out, 2, dim=1)
+            h = out_norm(h) * (1 + scale) + shift
+            h = out_rest(h)
         else:
-            # Fall back to original embedding conditioning if provided
-            if self.use_scale_shift_norm and emb_out is not None:
-                out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-                scale, shift = th.chunk(emb_out, 2, dim=1)
-                h = out_norm(h) * (1 + scale) + shift
-                h = out_rest(h)
-            else:
-                if emb_out is not None:
-                    h = h + emb_out
-                h = self.out_layers(h)
+            h = h + emb_out
+            h = self.out_layers(h)
         return self.skip_connection(x) + h
 
 
@@ -316,7 +269,7 @@ class AttentionBlock(nn.Module):
             # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
-        self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
+        self.proj_out = conv_nd(1, channels, channels, 1)
 
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
@@ -454,7 +407,7 @@ class UNetModel(nn.Module):
         channel_mult=(1, 2, 4, 8),
         conv_resample=True,
         dims=2,
-        # num_classes=None,
+        num_classes=None,
         use_checkpoint=False,
         use_fp16=False,
         num_heads=1,
@@ -463,10 +416,7 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
-        # Spatial conditioning config
-        cond_channels=0,
-        cond_concat=True,
-        cond_resblock_mode="add",  # "add", "film", or "none"
+        use_learnable_timestep=False
     ):
         super().__init__()
 
@@ -482,31 +432,32 @@ class UNetModel(nn.Module):
         self.dropout = dropout
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
-        # self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
         self.dtype = th.float16 if use_fp16 else th.float32
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
-        # Spatial conditioning
-        self.cond_channels = int(cond_channels) if cond_channels is not None else 0
-        self.cond_concat = bool(cond_concat)
-        self.cond_resblock_mode = cond_resblock_mode
+        self.use_learnable_timestep = use_learnable_timestep
 
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
-            nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
-        )
-
-        # if self.num_classes is not None:
-        #     self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+        if use_learnable_timestep:
+            time_embed_dim = model_channels * 4
+            self.time_embed = nn.Sequential(
+                linear(model_channels, time_embed_dim),
+                nn.SiLU(),
+                linear(time_embed_dim, time_embed_dim),
+            )
+            self.learnable_timestep = nn.Parameter(th.tensor([0.5]))
+            raise NotImplementedError(
+                "Need to implement linear projection for the condition to have same dim as the timestep embed"
+            )
+        else:
+            # size of the condition (input noise flattened)
+            time_embed_dim = 4096
+            self.learnable_timestep = None
 
         ch = input_ch = int(channel_mult[0] * model_channels)
-        first_in_channels = in_channels + (self.cond_channels if self.cond_concat and self.cond_channels > 0 else 0)
         self.input_blocks = nn.ModuleList(
-            [TimestepEmbedSequential(conv_nd(dims, first_in_channels, ch, 3, padding=1))]
+            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
         self._feature_size = ch
         input_block_chans = [ch]
@@ -522,8 +473,6 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                        cond_resblock_mode=self.cond_resblock_mode,
                     )
                 ]
                 ch = int(mult * model_channels)
@@ -553,8 +502,6 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
-                            cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                            cond_resblock_mode=self.cond_resblock_mode,
                         )
                         if resblock_updown
                         else Downsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -573,8 +520,6 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
-                cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                cond_resblock_mode=self.cond_resblock_mode,
             ),
             AttentionBlock(
                 ch,
@@ -590,8 +535,6 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
-                cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                cond_resblock_mode=self.cond_resblock_mode,
             ),
         )
         self._feature_size += ch
@@ -609,8 +552,6 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                        cond_resblock_mode=self.cond_resblock_mode,
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -636,8 +577,6 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
-                            cond_channels=(self.cond_channels if (self.cond_channels > 0 and self.cond_resblock_mode in ("add", "film")) else None),
-                            cond_resblock_mode=self.cond_resblock_mode,
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -649,7 +588,7 @@ class UNetModel(nn.Module):
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
+            conv_nd(dims, input_ch, out_channels, 3, padding=1),
         )
         self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to('cuda')
         for param in self.vae.parameters():
@@ -667,34 +606,36 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, y=None):
+    def forward(self, x, condition=None):
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param y: an [N] Tensor of labels, if class-conditional.
+        :param condition: an vector condition
         :return: an [N x C x ...] Tensor of outputs.
         """
 
+        if self.use_learnable_timestep and self.learnable_timestep is not None:
+            # Use the learnable timestep parameter and replicate for batch size
+            timesteps = self.learnable_timestep.expand(x.shape[0])
+            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))      
+            emb = emb + condition
+        else:
+            emb = condition
+
         hs = []
-        # Spatial condition (same size as x)
-        cond = y  # Expecting [N, Cc, H, W] or None
-
-        # Optional concat at input
-        h_in = x if (cond is None or not self.cond_concat or self.cond_channels == 0) else th.cat([x, cond], dim=1)
-
-        h = h_in.type(self.dtype)
+        h = x.type(self.dtype)
         for module in self.input_blocks:
-            h = module(h, None, cond)
+            h = module(h, emb)
             hs.append(h)
-        h = self.middle_block(h, None, cond)
+        h = self.middle_block(h, emb)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, None, cond)
+            h = module(h, emb)
 
         latent = self.out(h.to(x.dtype))
         decoded_images = self.vae.decode(latent /  self.vae.config.scaling_factor).sample
         return decoded_images
+
 
 
 class SuperResModel(UNetModel):
@@ -856,7 +797,7 @@ class EncoderUNetModel(nn.Module):
                 normalization(ch),
                 nn.SiLU(),
                 nn.AdaptiveAvgPool2d((1, 1)),
-                zero_module(conv_nd(dims, ch, out_channels, 1)),
+                conv_nd(dims, ch, out_channels, 1),
                 nn.Flatten(),
             )
         elif pool == "attention":
@@ -926,7 +867,6 @@ class UNetModelWrapper(UNetModel):
         channel_mult=None,
         learn_sigma=False,
         class_cond=False,
-        # num_classes=NUM_CLASSES,
         use_checkpoint=False,
         attention_resolutions="16",
         num_heads=1,
@@ -937,12 +877,11 @@ class UNetModelWrapper(UNetModel):
         resblock_updown=False,
         use_fp16=False,
         use_new_attention_order=False,
-        # Spatial conditioning config
-        cond_channels=0,
-        cond_concat=True,
-        cond_resblock_mode="add",
+        use_learnable_timestep=False,
+        **kwargs,  # Absorb any additional arguments
     ):
-        """Dim (tuple): (C, H, W)"""
+        self.use_learnable_timestep = use_learnable_timestep
+        
         image_size = dim[-1]
         if channel_mult is None:
             if image_size == 512:
@@ -976,7 +915,6 @@ class UNetModelWrapper(UNetModel):
             attention_resolutions=tuple(attention_ds),
             dropout=dropout,
             channel_mult=channel_mult,
-            # num_classes=(num_classes if class_cond else None),
             use_checkpoint=use_checkpoint,
             use_fp16=use_fp16,
             num_heads=num_heads,
@@ -985,10 +923,17 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
-            cond_channels=cond_channels,
-            cond_concat=cond_concat,
-            cond_resblock_mode=cond_resblock_mode,
+            use_learnable_timestep=use_learnable_timestep
         )
 
-    def forward(self, x, cond=None, *args, **kwargs):
-        return super().forward(x, y=cond)
+    def forward(self, x, condition=None, *args, **kwargs):
+        """Forward pass with optional timestep.
+        
+        Args:
+            x: Input tensor [N x C x ...]
+            condition: Optional conditioning information (not used for timestep in this implementation)
+        
+        Returns:
+            Output tensor [N x C x ...]
+        """
+        return super().forward(x=x, condition=condition)
