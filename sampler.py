@@ -161,8 +161,8 @@ class Sampler:
             )
 
         interleaved_conditions = torch.repeat_interleave(condition_tensor, sample_factor, dim=0)
-        print("sample_factor", sample_factor)
-        print("shape", interleaved_conditions.shape)
+        # print("sample_factor", sample_factor)
+        # print("shape", interleaved_conditions.shape)
         if not interleaved_conditions.is_contiguous():
             interleaved_conditions = interleaved_conditions.contiguous()
 
@@ -475,6 +475,7 @@ class Sampler:
                 if conditions:
                     # Take the contiguous slice from the prebuilt interleaved list
                     batch_conditions = interleaved_conditions[batch_slice]
+                    print(batch_slice)
                     if self.pool_condition_indices is not None:
                         batch_cond_idx = self.pool_condition_indices[batch_slice]
                         generated_samples = gen(
@@ -531,7 +532,7 @@ class Sampler:
                     gt_feat = self.dataset_proj[idx_i]
 
                     pool_feats = self.pool_samples_proj[pool_slice]  
-                    print("labels of latents being checked: " , self.pool_condition_indices[pool_slice])
+                    # print("labels of latents being checked: " , self.pool_condition_indices[pool_slice])
                     dists_label = torch.linalg.norm(pool_feats - gt_feat, dim=1)  
 
                     # Rejection sampling: mask distances below eps_radius if enabled
@@ -553,6 +554,10 @@ class Sampler:
                             
             self.total_excluded = total_rejected
             self.total_excluded_percentage = (total_rejected * 1.0 / max(1, self.pool_size)) * 100
+            
+            # Copy updated latents from tmp to selected
+            self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
+            
             print(f'Force resampling took {time.time() - t1}')
             return
 

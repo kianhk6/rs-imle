@@ -36,7 +36,7 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
     imle.zero_grad()
 
     cur_batch_latents = latents
-    print("loss inference: ", batch_conditions)
+    # print("loss inference: ", batch_conditions)
     if batch_condition_indices is not None:
         if torch.is_tensor(batch_condition_indices):
             print("Condition indices passed to training_step_imle:", batch_condition_indices.tolist())
@@ -331,22 +331,12 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 'total_excluded': sampler.total_excluded,
                 'total_excluded_percentage': sampler.total_excluded_percentage,
             }
-            
-            # Add condition data metrics if available
-            if condition_data is not None:
-                metrics['total_samples'] = len(condition_data)
-                metrics['condition_data_type'] = str(type(condition_data))
-                # Get shape from a sample
-                sample_condition = condition_data[0]
-                if isinstance(sample_condition, tuple):
-                    metrics['condition_shape'] = list(sample_condition[0].shape)
-                else:
-                    metrics['condition_shape'] = list(sample_condition.shape)
-                metrics['using_condition_vocabulary'] = True
+            print(split_condition_data.shape)
 
             if (epoch > 0 and epoch % H.fid_freq == 0):
+                print("calculating fid")
                 print("Learning rate: ", optimizer.param_groups[0]['lr'])
-                generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor))
+                generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor), condition_data=split_condition_data)
                 print(f'{H.data_root}/img', f'{H.save_dir}/fid/')
                 cur_fid = fid.compute_fid(f'{H.data_root}/img', f'{H.save_dir}/fid/', verbose=False)
                 if cur_fid < best_fid:
@@ -469,7 +459,7 @@ def main(H=None):
         sampler = Sampler(H, len(data_train), preprocess_fn)
         # generate_and_save(H, imle, sampler, 5000)
 
-        generate_and_save(H, imle, sampler, 5000)
+        generate_and_save(H, imle, sampler, 5000, condition_data=condition_data)
         print(f'{H.data_root}/img', f'{H.save_dir}/fid/')
         cur_fid = fid.compute_fid(f'{H.data_root}/img', f'{H.save_dir}/fid/', verbose=False)
         print("FID: ", cur_fid)
@@ -610,7 +600,7 @@ def main(H=None):
         # generate_and_save(H, imle, sampler, 5000)
 
         print("Generating images")
-        generate_and_save(H, imle, sampler, 1000, subdir='prec_rec')
+        generate_and_save(H, imle, sampler, 1000, subdir='prec_rec', condition_data=condition_data)
         print(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
         precision, recall = compute_prec_recall(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
         print("Precision: ", precision)
