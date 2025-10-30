@@ -76,7 +76,7 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
     if(experiment):
         experiment.log_image(fname, overwrite=True)
 
-def generate_and_save(H, imle, sampler, n_samp, subdir='fid'):
+def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=None):
 
     delete_content_of_dir(f'{H.save_dir}/{subdir}')
     
@@ -85,10 +85,31 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid'):
         for i in range(0, (n_samp // H.imle_batch)+1):
             
             batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
-
+            
+            # Skip if no samples to generate in this batch
+            if batch_size <= 0:
+                continue
+            
             temp_latent_rnds.normal_()
             tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
-            samp = sampler.sample(temp_latent_rnds, imle, tmp_snoise)
+            
+            # Handle condition data batching
+            batch_condition_data = None
+            if condition_data is not None:
+                # Cycle through conditions if we need more samples than available conditions
+                num_conditions = len(condition_data)
+                start_idx = (i * H.imle_batch) % num_conditions
+                indices = [(start_idx + j) % num_conditions for j in range(batch_size)]
+                batch_conditions = []
+                for idx in indices:
+                    cond_sample = condition_data[idx]
+                    if isinstance(cond_sample, tuple):
+                        batch_conditions.append(cond_sample[0])
+                    else:
+                        batch_conditions.append(cond_sample)
+                batch_condition_data = torch.stack(batch_conditions).cuda()
+            
+            samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
 
             for j in range(batch_size):
                 imageio.imwrite(f'{H.save_dir}/{subdir}/{i * H.imle_batch + j}.png', samp[j])

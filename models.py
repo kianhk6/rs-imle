@@ -142,11 +142,9 @@ class IMLE(nn.Module):
         # self.decoder = DiT_S_2()
         # self.decoder = Decoder(H)
         in_ch = 4
-        cond_ch = in_ch
-        total_in = in_ch + cond_ch  # 8
 
         self.decoder = UNetModelWrapper(
-            dim=(total_in, H.image_size // 8, H.image_size // 8),
+            dim=(in_ch, H.image_size // 8, H.image_size // 8),
             num_res_blocks=2,
             num_channels=128,
             channel_mult=[1, 2, 2, 2],
@@ -154,10 +152,6 @@ class IMLE(nn.Module):
             num_head_channels=64,
             attention_resolutions="16",
             dropout=0.1,
-            # concat-only: disable internal conditioning paths
-            cond_channels=0,
-            cond_concat=False,
-            cond_resblock_mode="none",
         )
 
 
@@ -167,9 +161,9 @@ class IMLE(nn.Module):
             batch_size = latents.shape[0]
             latent_side = self.img_size // 8
             latents = latents.reshape(batch_size, self.latent_channels, latent_side, latent_side)
-        x_cat = torch.cat([latents, condition_data], dim=1)
-        out = self.decoder(x_cat)
+
+        condition_data_flat = condition_data.flatten(start_dim=1)
+        out = self.decoder(latents, condition_data_flat)
         if return_condition:
-            # Return the raw condition_data and optional indices for debugging
             return out, { 'condition_data': condition_data, 'condition_indices': condition_indices }
         return out

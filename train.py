@@ -37,11 +37,11 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
 
     cur_batch_latents = latents
     # print("loss inference: ", batch_conditions)
-    if batch_condition_indices is not None:
-        if torch.is_tensor(batch_condition_indices):
-            print("Condition indices passed to training_step_imle:", batch_condition_indices.tolist())
-        else:
-            print("Condition indices passed to training_step_imle:", batch_condition_indices)
+    # if batch_condition_indices is not None:
+    #     if torch.is_tensor(batch_condition_indices):
+    #         print("Condition indices passed to training_step_imle:", batch_condition_indices.tolist())
+    #     else:
+    #         print("Condition indices passed to training_step_imle:", batch_condition_indices)
     # Pass condition data to the model if available
     if batch_conditions is not None:
         if hasattr(H, 'debug_return_condition') and H.debug_return_condition:
@@ -331,7 +331,6 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 'total_excluded': sampler.total_excluded,
                 'total_excluded_percentage': sampler.total_excluded_percentage,
             }
-            print(split_condition_data.shape)
 
             if (epoch > 0 and epoch % H.fid_freq == 0):
                 print("calculating fid")
@@ -375,16 +374,6 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                         f'{H.save_dir}/latest.png', logprint, experiment,
                         condition_data=cond_vis2,
                     )                    
-                # Save model checkpoint at the 50th epoch
-                model_checkpoint_path = f'{H.save_dir}/model_epoch_{epoch}.pt'
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': imle.state_dict(),
-                    'ema_model_state_dict': ema_imle.state_dict() if ema_imle else None,
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, model_checkpoint_path)
-                
-                logprint(f'Model checkpoint saved at: {model_checkpoint_path}')
 
             if H.use_wandb:
                 wandb.log(metrics, step=iterate)

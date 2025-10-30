@@ -475,7 +475,6 @@ class Sampler:
                 if conditions:
                     # Take the contiguous slice from the prebuilt interleaved list
                     batch_conditions = interleaved_conditions[batch_slice]
-                    print(batch_slice)
                     if self.pool_condition_indices is not None:
                         batch_cond_idx = self.pool_condition_indices[batch_slice]
                         generated_samples = gen(
