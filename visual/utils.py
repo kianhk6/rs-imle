@@ -26,36 +26,44 @@ def get_sample_for_visualization(data, preprocess_fn, num, dataset):
 
 
 
-def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None):
+def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None, save_to_file=False):
     mb = shape[0]
     initial = initial[:mb].cuda()
-    nns = sampler.sample(initial, ema_imle, snoise, condition_data=condition_data)
+    if condition_data is not None:
+        nns = sampler.sample(initial, ema_imle, snoise, condition_data=condition_data)
+    else:
+        nns = sampler.sample(initial, ema_imle, snoise)
+
     batches = [orig[:mb], nns]
     n_rows = len(batches)
     im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
         [n_rows * shape[1], mb * shape[2], 3])
 
-    logprint(f'printing samples to {fname}')
-    imageio.imwrite(fname, im)
+    if save_to_file:
+        logprint(f'printing samples to {fname}')
+        imageio.imwrite(fname, im)
+    else:
+        logprint(f'generated samples (not saved to file, only for logging)')
+    
+    return im
 
 
-def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None):
+def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None, save_to_file=False):
     mb = shape[0]
     initial = initial[:mb]
-    batches = [orig[:mb]]
-    # Row 1: with matching condition slice if provided
-    first_cond = condition_data[:mb] if condition_data is not None else None
-    batches.append(sampler.sample(initial, imle, snoise, condition_data=first_cond))
-
-    temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
-    for t in range(H.num_rows_visualize + 4):
-        temp_latent_rnds.normal_()
-        if(H.use_snoise == True):
-            tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
-        else:
-            tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-        # Subsequent rows: step through next condition windows of size mb
-        if condition_data is not None:
+    if condition_data is not None:
+        batches = [orig[:mb]]
+        # Row 1: with matching condition slice if provided
+        first_cond = condition_data[:mb] if condition_data is not None else None
+        batches.append(sampler.sample(initial, imle, snoise, condition_data=first_cond))
+        temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
+        for t in range(H.num_rows_visualize + 4):
+            temp_latent_rnds.normal_()
+            if(H.use_snoise == True):
+                tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
+            else:
+                tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
+            # Subsequent rows: step through next condition windows of size mb
             start = (t + 1) * mb
             end = start + mb
             if condition_data.shape[0] >= end:
@@ -63,53 +71,95 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             else:
                 idx = torch.arange(start, end) % max(1, condition_data.shape[0])
                 cur_cond = condition_data[idx]
-        else:
-            cur_cond = None
-        batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=cur_cond))
-        
-    n_rows = len(batches)
-    im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
-        [n_rows * shape[1], mb * shape[2], 3])
 
-    logprint(f'printing samples to {fname}')
-    imageio.imwrite(fname, im)
-    if(experiment):
-        experiment.log_image(fname, overwrite=True)
+            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=cur_cond))
+            
+        n_rows = len(batches)
+        im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
+            [n_rows * shape[1], mb * shape[2], 3])
+
+        if save_to_file:
+            logprint(f'printing samples to {fname}')
+            imageio.imwrite(fname, im)
+            if(experiment):
+                experiment.log_image(fname, overwrite=True)
+        else:
+            logprint(f'generated samples (not saved to file, only for logging)')
+            if(experiment):
+                # Log numpy array directly to comet without saving to file
+                experiment.log_image(im, name=fname, overwrite=True)
+    else:
+        batches = [orig[:mb], sampler.sample(initial, imle, snoise)]
+        temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
+        for t in range(H.num_rows_visualize + 4):
+            temp_latent_rnds.normal_()
+            if(H.use_snoise == True):
+                tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
+            else:
+                tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
+            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise))
+        n_rows = len(batches)
+        im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape([n_rows * shape[1], mb * shape[2], 3])
+        
+        if save_to_file:
+            logprint(f'printing samples to {fname}')
+            imageio.imwrite(fname, im)
+            if(experiment):
+                experiment.log_image(fname, overwrite=True)
+        else:
+            logprint(f'generated samples (not saved to file, only for logging)')
+            if(experiment):
+                # Log numpy array directly to comet without saving to file
+                experiment.log_image(im, name=fname, overwrite=True)
+
+
+
+        
 
 def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=None):
+    if condition_data is not None:
+        delete_content_of_dir(f'{H.save_dir}/{subdir}')
+        
+        with torch.no_grad():
+            temp_latent_rnds = torch.randn([H.imle_batch, H.latent_dim], dtype=torch.float32).cuda()
+            for i in range(0, (n_samp // H.imle_batch)+1):
+                
+                batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
+                
+                temp_latent_rnds.normal_()
+                tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
+                
+                # Handle condition data batching
+                # replace lines 96-111 in visual/utils.py with this
+                # Handle condition data batching (random sample)
+                batch_condition_data = None
+                if condition_data is not None:
+                    num_conditions = len(condition_data)
+                    rand_indices = torch.randint(0, num_conditions, (batch_size,), device='cpu').tolist()
+                    batch_conditions = []
+                    for idx in rand_indices:
+                        cond_sample = condition_data[idx]
+                        if isinstance(cond_sample, tuple):
+                            batch_conditions.append(cond_sample[0])
+                        else:
+                            batch_conditions.append(cond_sample)
+                    batch_condition_data = torch.stack(batch_conditions).cuda()
+                
+                samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
 
-    delete_content_of_dir(f'{H.save_dir}/{subdir}')
-    
-    with torch.no_grad():
-        temp_latent_rnds = torch.randn([H.imle_batch, H.latent_dim], dtype=torch.float32).cuda()
-        for i in range(0, (n_samp // H.imle_batch)+1):
-            
-            batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
-            
-            # Skip if no samples to generate in this batch
-            if batch_size <= 0:
-                continue
-            
-            temp_latent_rnds.normal_()
-            tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
-            
-            # Handle condition data batching
-            batch_condition_data = None
-            if condition_data is not None:
-                # Cycle through conditions if we need more samples than available conditions
-                num_conditions = len(condition_data)
-                start_idx = (i * H.imle_batch) % num_conditions
-                indices = [(start_idx + j) % num_conditions for j in range(batch_size)]
-                batch_conditions = []
-                for idx in indices:
-                    cond_sample = condition_data[idx]
-                    if isinstance(cond_sample, tuple):
-                        batch_conditions.append(cond_sample[0])
-                    else:
-                        batch_conditions.append(cond_sample)
-                batch_condition_data = torch.stack(batch_conditions).cuda()
-            
-            samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
+                for j in range(batch_size):
+                    imageio.imwrite(f'{H.save_dir}/{subdir}/{i * H.imle_batch + j}.png', samp[j])
+    else:
+        delete_content_of_dir(f'{H.save_dir}/{subdir}')    
+        with torch.no_grad():
+            temp_latent_rnds = torch.randn([H.imle_batch, H.latent_dim], dtype=torch.float32).cuda()
+            for i in range(0, (n_samp // H.imle_batch)+1):
+                
+                batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
 
-            for j in range(batch_size):
-                imageio.imwrite(f'{H.save_dir}/{subdir}/{i * H.imle_batch + j}.png', samp[j])
+                temp_latent_rnds.normal_()
+                tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
+                samp = sampler.sample(temp_latent_rnds, imle, tmp_snoise)
+
+                for j in range(batch_size):
+                    imageio.imwrite(f'{H.save_dir}/{subdir}/{i * H.imle_batch + j}.png', samp[j])
