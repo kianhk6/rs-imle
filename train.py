@@ -15,6 +15,7 @@ from helpers.train_helpers import (load_imle, load_opt, save_latents,
                                    save_latents_latest, save_model,
                                    save_snoise, set_up_hyperparams, update_ema)
 from helpers.utils import ZippedDataset, get_cpu_stats_over_ranks
+from helpers.seed_utils import seed_worker, get_generator
 from metrics.ppl import calc_ppl
 from metrics.ppl_uniform import calc_ppl_uniform
 from sampler import Sampler
@@ -205,18 +206,23 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 cond_vis = None
                 if split_condition_data is not None:
                     cond_vis = split_condition_data[vis_idx]
-                with torch.no_grad():
-                    generate_for_NN(
-                        sampler,
-                        split_x_tensor[vis_idx],
-                        latents,
-                        [s[vis_idx] for s in sampler.selected_snoise],
-                        viz_batch_original.shape,
-                        imle,
-                        f'{H.save_dir}/NN-samples_{epoch}-imle.png',
-                        logprint,
-                        condition_data=cond_vis,
-                    )
+                    with torch.no_grad():
+                        generate_for_NN(
+                            sampler,
+                            split_x_tensor[vis_idx],
+                            latents,
+                            [s[vis_idx] for s in sampler.selected_snoise],
+                            viz_batch_original.shape,
+                            imle,
+                            f'{H.save_dir}/NN-samples_{epoch}-imle.png',
+                            logprint,
+                            condition_data=cond_vis,
+                        )
+                else:
+                        generate_for_NN(sampler, split_x_tensor[to_update[:H.num_images_visualize]], latents,
+                            [s[to_update[:H.num_images_visualize]] for s in sampler.selected_snoise],
+                            viz_batch_original.shape, imle,
+                            f'{H.save_dir}/NN-samples_{epoch}-imle.png', logprint)
 
             comb_dataset = ZippedDataset(split_x, TensorDataset(sampler.selected_latents))
             data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=0, persistent_workers=False)
@@ -246,21 +252,27 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 for i in range(len(H.res)):
                     cur_snoise[i].zero_()
 
-                stat = training_step_imle(
-                    H,
-                    target.shape[0],
-                    target,
-                    latents,
-                    cur_snoise,
-                    imle,
-                    ema_imle,
-                    optimizer,
-                    sampler.calc_loss,
-                    condition_data,
-                    batch_conditions,
-                    batch_condition_indices=indices,
-                )
-                stats.append(stat)
+                if condition_data is not None: 
+                    stat = training_step_imle(
+                        H,
+                        target.shape[0],
+                        target,
+                        latents,
+                        cur_snoise,
+                        imle,
+                        ema_imle,
+                        optimizer,
+                        sampler.calc_loss,
+                        condition_data,
+                        batch_conditions,
+                        batch_condition_indices=indices,
+                    )
+                    stats.append(stat)
+                else:
+                    stat = training_step_imle(H, target.shape[0], target, latents, cur_snoise, imle, ema_imle, optimizer, sampler.calc_loss)
+                    stats.append(stat)
+
+
 
                 if(iterate <= H.warmup_iters):
                     # print("Warmup iteration: ", iterate)
@@ -271,14 +283,20 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                         cond_vis2 = None
                         if split_condition_data is not None:
                             cond_vis2 = split_condition_data[0: H.num_images_visualize]
-                        generate_images_initial(
-                            H, sampler, viz_batch_original,
+                            generate_images_initial(
+                                H, sampler, viz_batch_original,
+                                sampler.selected_latents[0: H.num_images_visualize],
+                                [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
+                                viz_batch_original.shape, imle, ema_imle,
+                                f'{H.save_dir}/samples-{iterate}.png', logprint, experiment,
+                                condition_data=cond_vis2,
+                            )
+                        else:
+                            generate_images_initial(H, sampler, viz_batch_original,
                             sampler.selected_latents[0: H.num_images_visualize],
                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle, ema_imle,
-                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment,
-                            condition_data=cond_vis2,
-                        )
+                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment)
 
                 iterate += 1
                 if iterate % H.iters_per_save == 0:
@@ -304,15 +322,37 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             cur_dists_lpips = torch.empty([subset_len], dtype=torch.float32).cuda()
             cur_dists_l2 = torch.empty([subset_len], dtype=torch.float32).cuda()
 
-
-            cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(split_x_tensor, imle, 
-                                                                                            dists=cur_dists,  
-                                                                                            dists_lpips=cur_dists_lpips,
-                                                                                            dists_l2=cur_dists_l2, 
-                                                                                            logging=True,
-                                                                                            conditions=split_condition_data,
-                                                                                            expect_condition_indices=False)
-
+            if condition_data != None:
+                cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(split_x_tensor, imle, 
+                                                                                                dists=cur_dists,  
+                                                                                                dists_lpips=cur_dists_lpips,
+                                                                                                dists_l2=cur_dists_l2, 
+                                                                                                logging=True,
+                                                                                                conditions=split_condition_data,
+                                                                                                expect_condition_indices=False)
+            else:
+                cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(split_x_tensor, imle, 
+                                                                                dists=cur_dists,  
+                                                                                dists_lpips=cur_dists_lpips,
+                                                                                dists_l2=cur_dists_l2, 
+                                                                                logging=True)
+            # # Compute metrics with the generator in eval mode to avoid dropout noise
+            # was_training = imle.training
+            # imle.eval()
+            # try:
+            #     cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(
+            #         split_x_tensor,
+            #         imle,
+            #         dists=cur_dists,
+            #         dists_lpips=cur_dists_lpips,
+            #         dists_l2=cur_dists_l2,
+            #         logging=True,
+            #         conditions=split_condition_data,
+            #         expect_condition_indices=False,
+            #     )
+            # finally:
+            #     if was_training:
+            #         imle.train()
             # torch.save(cur_dists, f'{H.save_dir}/latent/dists-{epoch}.npy')
                     
             metrics = {
@@ -335,9 +375,14 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             if (epoch > 0 and epoch % H.fid_freq == 0):
                 print("calculating fid")
                 print("Learning rate: ", optimizer.param_groups[0]['lr'])
-                generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor), condition_data=split_condition_data)
-                print(f'{H.data_root}/img', f'{H.save_dir}/fid/')
-                cur_fid = fid.compute_fid(f'{H.data_root}/img', f'{H.save_dir}/fid/', verbose=False)
+                if split_condition_data != None:
+                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor), condition_data=split_condition_data)
+                else:
+                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor))
+
+                real_dir = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
+                print(real_dir, f'{H.save_dir}/fid/')
+                cur_fid = fid.compute_fid(real_dir, f'{H.save_dir}/fid/', verbose=False)
                 if cur_fid < best_fid:
                     best_fid = cur_fid
                     # save models
@@ -363,17 +408,25 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
             if epoch % 50 == 0:
                 with torch.no_grad():
+
                     cond_vis2 = None
                     if split_condition_data is not None:
                         cond_vis2 = split_condition_data[0: H.num_images_visualize]
-                    generate_images_initial(
-                        H, sampler, viz_batch_original,
+                        generate_images_initial(
+                            H, sampler, viz_batch_original,
+                            sampler.selected_latents[0: H.num_images_visualize],
+                            [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
+                            viz_batch_original.shape, imle, ema_imle,
+                            f'{H.save_dir}/latest.png', logprint, experiment,
+                            condition_data=cond_vis2,
+                        )
+
+                    else:
+                        generate_images_initial(H, sampler, viz_batch_original,
                         sampler.selected_latents[0: H.num_images_visualize],
                         [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                         viz_batch_original.shape, imle, ema_imle,
-                        f'{H.save_dir}/latest.png', logprint, experiment,
-                        condition_data=cond_vis2,
-                    )                    
+                        f'{H.save_dir}/latest.png', logprint, experiment)                    
 
             if H.use_wandb:
                 wandb.log(metrics, step=iterate)
@@ -446,11 +499,10 @@ def main(H=None):
         if subset_len == -1:
             subset_len = len(data_train)
         sampler = Sampler(H, len(data_train), preprocess_fn)
-        # generate_and_save(H, imle, sampler, 5000)
-
-        generate_and_save(H, imle, sampler, 5000, condition_data=condition_data)
-        print(f'{H.data_root}/img', f'{H.save_dir}/fid/')
-        cur_fid = fid.compute_fid(f'{H.data_root}/img', f'{H.save_dir}/fid/', verbose=False)
+        generate_and_save(H, imle, sampler, 5000)
+        real_dir = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
+        print(real_dir, f'{H.save_dir}/fid/')
+        cur_fid = fid.compute_fid(real_dir, f'{H.save_dir}/fid/', verbose=False)
         print("FID: ", cur_fid)
 
 
@@ -589,7 +641,7 @@ def main(H=None):
         # generate_and_save(H, imle, sampler, 5000)
 
         print("Generating images")
-        generate_and_save(H, imle, sampler, 1000, subdir='prec_rec', condition_data=condition_data)
+        generate_and_save(H, imle, sampler, 1000, subdir='prec_rec')
         print(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
         precision, recall = compute_prec_recall(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
         print("Precision: ", precision)

@@ -182,13 +182,17 @@ class ResBlock(TimestepBlock):
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
-        self.emb_layers = nn.Sequential(
-            nn.SiLU(),
-            linear(
-                emb_channels,
-                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
-            ),
-        )
+        # Only create embedding layers if emb_channels > 0 (i.e., using conditioning)
+        if emb_channels > 0:
+            self.emb_layers = nn.Sequential(
+                nn.SiLU(),
+                linear(
+                    emb_channels,
+                    2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+                ),
+            )
+        else:
+            self.emb_layers = None
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
@@ -221,17 +225,23 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
-        if self.use_scale_shift_norm:
-            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = out_norm(h) * (1 + scale) + shift
-            h = out_rest(h)
+        
+        # Only use embedding if emb_layers were created and emb is provided
+        if self.emb_layers is not None and emb is not None: 
+            emb_out = self.emb_layers(emb).type(h.dtype)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
+            if self.use_scale_shift_norm:
+                out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+                scale, shift = th.chunk(emb_out, 2, dim=1)
+                h = out_norm(h) * (1 + scale) + shift
+                h = out_rest(h)
+            else:
+                h = h + emb_out
+                h = self.out_layers(h)
         else:
-            h = h + emb_out
             h = self.out_layers(h)
+
         return self.skip_connection(x) + h
 
 
@@ -270,6 +280,7 @@ class AttentionBlock(nn.Module):
             self.attention = QKVAttentionLegacy(self.num_heads)
 
         self.proj_out = conv_nd(1, channels, channels, 1)
+
 
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
@@ -416,7 +427,8 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
-        use_learnable_timestep=False
+        use_learnable_timestep=False,
+        use_conditioning=True
     ):
         super().__init__()
 
@@ -438,8 +450,14 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.use_learnable_timestep = use_learnable_timestep
+        self.use_conditioning = use_conditioning
 
-        if use_learnable_timestep:
+        if not use_conditioning and not use_learnable_timestep:
+            # No conditioning and no learnable timestep - skip embedding layers
+            time_embed_dim = 0
+            self.learnable_timestep = None
+            print("UNet: No conditioning or timestep - embedding layers skipped")
+        elif use_learnable_timestep:
             time_embed_dim = model_channels * 4
             self.time_embed = nn.Sequential(
                 linear(model_channels, time_embed_dim),
@@ -590,6 +608,13 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             conv_nd(dims, input_ch, out_channels, 3, padding=1),
         )
+        
+        # Xavier initialization with standard gain for high variance
+        # Zero bias to keep mean close to 0
+        nn.init.xavier_uniform_(self.out[-1].weight, gain=0.01)
+        if self.out[-1].bias is not None:
+            nn.init.zeros_(self.out[-1].bias)
+        
         self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to('cuda')
         for param in self.vae.parameters():
             param.requires_grad = False
@@ -878,9 +903,11 @@ class UNetModelWrapper(UNetModel):
         use_fp16=False,
         use_new_attention_order=False,
         use_learnable_timestep=False,
+        use_conditioning=True,
         **kwargs,  # Absorb any additional arguments
     ):
         self.use_learnable_timestep = use_learnable_timestep
+        self.use_conditioning = use_conditioning
         
         image_size = dim[-1]
         if channel_mult is None:
@@ -923,7 +950,8 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
-            use_learnable_timestep=use_learnable_timestep
+            use_learnable_timestep=use_learnable_timestep,
+            use_conditioning=use_conditioning
         )
 
     def forward(self, x, condition=None, *args, **kwargs):

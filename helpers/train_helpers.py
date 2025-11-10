@@ -9,6 +9,7 @@ import json
 import subprocess
 from hps import Hyperparams, parse_args_and_update_hparams, add_imle_arguments
 from helpers.utils import (logger, maybe_download)
+from helpers.seed_utils import seed_everything
 from data import mkdir_p
 from contextlib import contextmanager
 import torch.distributed as dist
@@ -103,9 +104,11 @@ def set_up_hyperparams(s=None):
     logprint = logger(H.logdir)
     for i, k in enumerate(sorted(H)):
         logprint(type='hparam', key=k, value=H[k])
-    np.random.seed(H.seed)
-    torch.manual_seed(H.seed)
-    torch.cuda.manual_seed(H.seed)
+    
+    # # # # Comprehensive seeding for reproducibility
+    deterministic_mode = getattr(H, 'deterministic_mode', False)
+    seed_everything(H.seed, deterministic_mode=deterministic_mode)
+    
     logprint('training model', H.desc, 'on', H.dataset)
     return H, logprint
 
@@ -114,7 +117,7 @@ def restore_params(model, path, local_rank, mpi_size, map_ddp=True, map_cpu=Fals
     state_dict = torch.load(distributed_maybe_download(path, local_rank, mpi_size), map_location='cpu' if map_cpu else None)
     if map_ddp:
         new_state_dict = {}
-        l = len('module.')
+        l = len('module.')  
         for k in state_dict:
             if k.startswith('module.'):
                 new_state_dict[k[l:]] = state_dict[k]

@@ -136,34 +136,68 @@ class IMLE(nn.Module):
         self.dci_db = None
         self.img_size = H.image_size
         self.latent_channels = 4
-        # self.decoder = Decoder(H)
-        # self.decoder = FixedUNet32()
+        self.H = H
+        
+        # Determine model type: auto, vdvae, or unet
+        model_type = H.model_type if hasattr(H, 'model_type') else 'auto'
+        
+        if model_type == 'auto':
+            # Auto mode: choose based on condition_path
+            use_unet = H.condition_path is not None
+        elif model_type == 'unet':
+            use_unet = True
+        elif model_type == 'vdvae':
+            use_unet = False
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}. Choose from 'vdvae', 'unet', or 'auto'")
+        
+        if use_unet:
+            in_ch = 4
+            # Determine if we need conditioning - only if condition_path is provided
+            use_conditioning = H.condition_path is not None
+            
+            self.decoder = UNetModelWrapper(
+                dim=(in_ch, H.image_size // 8, H.image_size // 8),
+                num_res_blocks=2,
+                num_channels=128,
+                channel_mult=[1, 2, 2, 2],
+                num_heads=4,
+                num_head_channels=64,
+                attention_resolutions="16",
+                dropout=0.1,
+                use_conditioning=use_conditioning,
+            )
+            print(f"Using UNet model (conditional: {use_conditioning})")
+        else:
+            self.decoder = Decoder(H)
+            print(f"Using VDVAE model")
 
-        # self.decoder = DiT_S_2()
-        # self.decoder = Decoder(H)
-        in_ch = 4
 
-        self.decoder = UNetModelWrapper(
-            dim=(in_ch, H.image_size // 8, H.image_size // 8),
-            num_res_blocks=2,
-            num_channels=128,
-            channel_mult=[1, 2, 2, 2],
-            num_heads=4,
-            num_head_channels=64,
-            attention_resolutions="16",
-            dropout=0.1,
-        )
 
 
 
     def forward(self, latents, spatial_noise=None, input_is_w=False, condition_data=None, condition_indices=None, return_condition=False):
-        if latents.ndim != 4:
-            batch_size = latents.shape[0]
-            latent_side = self.img_size // 8
-            latents = latents.reshape(batch_size, self.latent_channels, latent_side, latent_side)
+        # Check if using UNet or VDVAE
+        is_unet = isinstance(self.decoder, UNetModelWrapper)
+        
+        if is_unet:
+            # UNet model - can work with or without conditions
+            if latents.ndim != 4:
+                batch_size = latents.shape[0]
+                latent_side = self.img_size // 8
+                latents = latents.reshape(batch_size, self.latent_channels, latent_side, latent_side)
+            
+            # Prepare condition (can be None for unconditional)
+            condition_emb = None
+            if condition_data is not None:
+                condition_emb = condition_data.flatten(start_dim=1)
+            
+            out = self.decoder(latents, condition_emb)
+            
+            if return_condition:
+                return out, {'condition_data': condition_data, 'condition_indices': condition_indices}
+            return out
+        else:
+            # VDVAE model - uses spatial_noise instead of conditions
+            return self.decoder.forward(latents, spatial_noise, input_is_w)
 
-        condition_data_flat = condition_data.flatten(start_dim=1)
-        out = self.decoder(latents, condition_data_flat)
-        if return_condition:
-            return out, { 'condition_data': condition_data, 'condition_indices': condition_indices }
-        return out

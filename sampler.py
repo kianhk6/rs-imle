@@ -50,13 +50,10 @@ class Sampler:
         self.selected_dists_l2 = torch.empty([sz], dtype=torch.float32).cuda()
         self.selected_dists_l2[:] = np.inf 
 
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
-        # where you sample: sample something 32 * 32, when passing into network reshape it 
+
         self.temp_latent_rnds = torch.empty([self.H.imle_db_size, self.H.latent_dim], dtype=torch.float32)
         self.temp_samples = torch.empty([self.H.imle_db_size, H.image_channels, self.H.image_size, self.H.image_size],
                                         dtype=torch.float32)
-
-        # print("hellooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo")
 
         self.pool_latents = torch.randn([self.pool_size, H.latent_dim], dtype=torch.float32)
         self.sample_pool_usage = torch.ones([sz], dtype=torch.bool)
@@ -64,7 +61,8 @@ class Sampler:
         self.projections = []
         self.lpips_net = LPNet(pnet_type=H.lpips_net, path=H.lpips_path).cuda()
         self.l2_projection = None
-
+        self.knn_ignore = H.knn_ignore
+        self.ignore_radius = H.ignore_radius
         fake = torch.zeros(1, 3, H.image_size, H.image_size).cuda()
         out, shapes = self.lpips_net(fake)
         sum_dims = 0
@@ -390,8 +388,6 @@ class Sampler:
                         )
                     else:
                         out = gen(cur_latents, cur_snoise, condition_data=batch_conditions)
-                
-
                 else:
                     out = gen(cur_latents, cur_snoise)                                
                 if(logging):
@@ -444,25 +440,26 @@ class Sampler:
             if(self.H.use_snoise == True):
                 self.snoise_pool[i].normal_()
         
-        if conditions is True:
+        if self.condition_config:
             interleaved_conditions = self.pool_condition_data
             interleaved_cond_idx = self.pool_condition_indices
+            if interleaved_conditions.shape[0] != self.pool_size:
+                raise ValueError(
+                    f"Expected interleaved conditions with first dimension {self.pool_size}, "
+                    f"got {interleaved_conditions.shape[0]}"
+                )
 
-
-        if interleaved_conditions.shape[0] != self.pool_size:
-            raise ValueError(
-                f"Expected interleaved conditions with first dimension {self.pool_size}, "
-                f"got {interleaved_conditions.shape[0]}"
-            )
-
-        if interleaved_cond_idx.shape[0] != self.pool_size:
-            raise ValueError(
-                f"Expected interleaved condition indices with length {self.pool_size}, "
-                f"got {interleaved_cond_idx.shape[0]}"
-            )
+            if interleaved_cond_idx.shape[0] != self.pool_size:
+                raise ValueError(
+                    f"Expected interleaved condition indices with length {self.pool_size}, "
+                    f"got {interleaved_cond_idx.shape[0]}"
+                )
 
         num_batches = self.pool_size // self.H.imle_batch
         
+        # Accumulators for overall statistics across all batches
+        all_variances = []
+        all_means = []
         
         for j in range(self.pool_size // self.H.imle_batch):
             batch_slice = slice(j * self.H.imle_batch, (j + 1) * self.H.imle_batch)
@@ -472,7 +469,7 @@ class Sampler:
 
             with torch.no_grad():
                 # Generate samples with or without condition data
-                if conditions:
+                if self.condition_config:
                     # Take the contiguous slice from the prebuilt interleaved list
                     batch_conditions = interleaved_conditions[batch_slice]
                     if self.pool_condition_indices is not None:
@@ -493,6 +490,33 @@ class Sampler:
                     self.pool_samples_proj[batch_slice] = self.get_l2_feature(generated_samples, False)
                 else:
                     self.pool_samples_proj[batch_slice] = self.get_combined_feature(generated_samples, False)
+                
+        #         # Compute variance statistics for generated_samples
+        #         # Shape: [Batch, 3, 256, 256] -> compute variance ACROSS different images (batch dimension)
+        #         # Variance across batch at each pixel/channel location
+        #         variance_across_images = torch.var(generated_samples, dim=0)  # Shape: [3, 256, 256]
+        #         # Mean of the variance (average variance across all pixel locations)
+        #         mean_variance = torch.mean(variance_across_images).item()
+        #         # Overall mean across all dimensions
+        #         overall_mean = torch.mean(generated_samples).item()
+                
+        #         # Accumulate for overall statistics
+        #         all_variances.append(mean_variance)
+        #         all_means.append(overall_mean)
+                
+        #         print(f"Batch {j}/{num_batches} - Shape: {generated_samples.shape}, Mean variance across images: {mean_variance:.6f}, Overall mean: {overall_mean:.6f}")
+        
+        # # Print overall statistics across all batches
+        # if all_variances:
+        #     avg_variance_across_batches = sum(all_variances) / len(all_variances)
+        #     avg_mean_across_batches = sum(all_means) / len(all_means)
+        #     print(f"\n=== OVERALL STATISTICS (Variance across different images) ===")
+        #     print(f"Average variance across images: {avg_variance_across_batches:.6f}")
+        #     print(f"Average of overall means: {avg_mean_across_batches:.6f}")
+        #     print(f"Total batches processed: {len(all_variances)}")
+        #     print(f"Total images: {len(all_variances) * self.H.imle_batch}\n")
+
+        # #############                 print(generated_samples.shape) get variance here
             
 
     def imle_sample_force(self, dataset, gen, to_update=None, condition_data=None):
@@ -595,148 +619,46 @@ class Sampler:
                         
                         total_rejected += rejected_flag.sum().item()
             
-            self.total_excluded = total_rejected
-            self.total_excluded_percentage = (total_rejected * 1.0 / self.pool_size) * 100
+                self.total_excluded = total_rejected
+                self.total_excluded_percentage = (total_rejected * 1.0 / self.pool_size) * 100
 
-            with torch.no_grad():
-                for i in range(self.pool_size // self.H.imle_db_size):
-                    pool_slice = slice(i * self.H.imle_db_size, (i + 1) * self.H.imle_db_size)
-                    if not gen.module.dci_db:
-                        device_count = torch.cuda.device_count()
-                        gen.module.dci_db = MDCI(self.dci_dim, num_comp_indices=self.H.num_comp_indices,
-                                                    num_simp_indices=self.H.num_simp_indices, devices=[i for i in range(device_count)])
-                    gen.module.dci_db.add(self.pool_samples_proj[pool_slice])
-                    pool_latents = self.pool_latents[pool_slice]
-                    snoise_pool = [b[pool_slice] for b in self.snoise_pool]
+                with torch.no_grad():
+                    for i in range(self.pool_size // self.H.imle_db_size):
+                        pool_slice = slice(i * self.H.imle_db_size, (i + 1) * self.H.imle_db_size)
+                        if not gen.module.dci_db:
+                            device_count = torch.cuda.device_count()
+                            gen.module.dci_db = MDCI(self.dci_dim, num_comp_indices=self.H.num_comp_indices,
+                                                        num_simp_indices=self.H.num_simp_indices, devices=[i for i in range(device_count)])
+                        gen.module.dci_db.add(self.pool_samples_proj[pool_slice])
+                        pool_latents = self.pool_latents[pool_slice]
+                        snoise_pool = [b[pool_slice] for b in self.snoise_pool]
 
-                    t0 = time.time()
-                    for ind, y in enumerate(DataLoader(TensorDataset(dataset[to_update]), batch_size=self.H.imle_batch)):
-                        _, target = self.preprocess_fn(y)
-                        batch_slice = slice(ind * self.H.imle_batch, ind * self.H.imle_batch + target.shape[0])
-                        indices = to_update[batch_slice]
-                        x = self.dataset_proj[indices]
-                        nearest_indices, dci_dists = gen.module.dci_db.query(x.float(), num_neighbours=1)
-                        nearest_indices = nearest_indices.long()[:, 0]
-                        nearest_indices = nearest_indices.cpu()
-                        dci_dists = dci_dists[:, 0]
+                        t0 = time.time()
+                        for ind, y in enumerate(DataLoader(TensorDataset(dataset[to_update]), batch_size=self.H.imle_batch)):
+                            _, target = self.preprocess_fn(y)
+                            batch_slice = slice(ind * self.H.imle_batch, ind * self.H.imle_batch + target.shape[0])
+                            indices = to_update[batch_slice]
+                            x = self.dataset_proj[indices]
+                            nearest_indices, dci_dists = gen.module.dci_db.query(x.float(), num_neighbours=1)
+                            nearest_indices = nearest_indices.long()[:, 0]
+                            nearest_indices = nearest_indices.cpu()
+                            dci_dists = dci_dists[:, 0]
 
-                        need_update = dci_dists < self.selected_dists_tmp[indices]
-                        need_update = need_update.cpu()
-                        global_need_update = indices[need_update]
+                            need_update = dci_dists < self.selected_dists_tmp[indices]
+                            need_update = need_update.cpu()
+                            global_need_update = indices[need_update]
 
-                        self.selected_dists_tmp[global_need_update] = dci_dists[need_update].clone()
-                        self.selected_latents_tmp[global_need_update] = pool_latents[nearest_indices[need_update]].clone() + self.H.imle_perturb_coef * torch.randn((need_update.sum(), self.H.latent_dim))
-                        for j in range(len(self.res)):
-                            self.selected_snoise[j][global_need_update] = snoise_pool[j][nearest_indices[need_update]].clone()
+                            self.selected_dists_tmp[global_need_update] = dci_dists[need_update].clone()
+                            self.selected_latents_tmp[global_need_update] = pool_latents[nearest_indices[need_update]].clone() + self.H.imle_perturb_coef * torch.randn((need_update.sum(), self.H.latent_dim))
+                            for j in range(len(self.res)):
+                                self.selected_snoise[j][global_need_update] = snoise_pool[j][nearest_indices[need_update]].clone()
 
-                    gen.module.dci_db.clear()
+                        gen.module.dci_db.clear()
 
-                    if i % 100 == 0:
-                        print("NN calculated for {} out of {} - {}".format((i + 1) * self.H.imle_db_size, self.pool_size, time.time() - t0))
-            
-            self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
+                        if i % 100 == 0:
+                            print("NN calculated for {} out of {} - {}".format((i + 1) * self.H.imle_db_size, self.pool_size, time.time() - t0))
+                
+                self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
 
         print(f'Force resampling took {time.time() - t1}')
     
-    def imle_sample_force_conditional(self, dataset, gen, to_update=None):
-        """
-        For each real sample index in `to_update`, generate `force_factor` candidates
-        and select the nearest only within that sample's own candidate group.
-
-        This avoids global mixing and enforces per-data matching.
-        """
-        if to_update is None:
-            to_update = self.entire_ds
-        if to_update.shape[0] == 0:
-            return
-
-        # Ensure CPU tensor for indexing and also create a CUDA copy when updating CUDA tensors
-        to_update = to_update.cpu()
-
-        ff = max(1, int(self.H.force_factor))
-        # Keep candidate batch within the same memory budget as imle_db_size
-        chunk_size = max(1, self.H.imle_db_size // ff)
-
-        # Reset temporary distances on the subset we are updating
-        self.selected_dists_tmp[to_update.cuda()] = float('inf')
-
-        t1 = time.time()
-        micro = max(1, int(getattr(self.H, 'cond_micro_batch', 16)))
-        with torch.no_grad():
-            for start in range(0, to_update.shape[0], chunk_size):
-                end = min(start + chunk_size, to_update.shape[0])
-                indices = to_update[start:end]  # CPU LongTensor
-                if indices.numel() == 0:
-                    continue
-
-                cur_chunk = indices.shape[0]
-                real_proj_chunk = self.dataset_proj[indices].cuda()
-
-                # For each sample, stream its group in micro-batches
-                for i in range(cur_chunk):
-                    best_dist = float('inf')
-                    best_latent = None
-                    best_snoise = None
-                    accepted = False
-
-                    rp = real_proj_chunk[i:i+1]  # [1, d]
-
-                    for k in range(0, ff, micro):
-                        m = min(micro, ff - k)
-                        z = torch.randn(m, self.H.latent_dim, dtype=torch.float32)
-                        if self.H.use_snoise:
-                            s_micro = [torch.randn(m, 1, s, s, dtype=torch.float32) for s in self.res]
-                        else:
-                            s_micro = [torch.zeros(m, 1, s, s, dtype=torch.float32) for s in self.res]
-
-                        out = gen(z, s_micro)
-
-                        if (self.H.search_type == 'lpips'):
-                            p = self.get_projected(out, False)
-                        elif (self.H.search_type == 'l2'):
-                            p = self.get_l2_feature(out, False)
-                        else:
-                            p = self.get_combined_feature(out, False)
-
-                        dists = torch.linalg.norm(p - rp, dim=1)
-
-                        if getattr(self.H, 'use_rsimle', False):
-                            reject_mask = dists < self.H.eps_radius
-                            if torch.all(reject_mask):
-                                del out, p, dists
-                                continue
-                            dists = dists.masked_fill(reject_mask, float('inf'))
-
-                        j = torch.argmin(dists).item()
-                        d_best = dists[j].item()
-                        if d_best != float('inf') and d_best < best_dist:
-                            best_dist = d_best
-                            best_latent = z[j].clone()
-                            best_snoise = [s[j].clone() for s in s_micro]
-                            accepted = True
-
-                        del out, p, dists
-
-                    if not accepted:
-                        raise RuntimeError(
-                            f"All {ff} candidates rejected for sample index {indices[i].item()} at eps_radius={self.H.eps_radius}"
-                        )
-
-                    idx = indices[i]
-                    self.selected_dists_tmp[idx.cuda()] = torch.tensor(best_dist, device='cuda')
-                    self.selected_latents_tmp[idx] = best_latent
-                    for j in range(len(self.res)):
-                        self.selected_snoise[j][idx] = best_snoise[j]
-
-        # Commit updates
-        self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
-
-        # Track exclusion metrics for logging consistency
-        # self.total_excluded = total_rejected
-        # if processed_candidates > 0:
-        #     self.total_excluded_percentage = (total_rejected * 1.0 / processed_candidates) * 100
-        # else:
-        #     self.total_excluded_percentage = 0
-
-        print(f'Conditional force resampling took {time.time() - t1}')
-

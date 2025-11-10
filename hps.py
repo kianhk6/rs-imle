@@ -40,11 +40,13 @@ def parse_args_and_update_hparams(H, parser, s=None):
 
 def add_imle_arguments(parser):
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--deterministic_mode', default=False, type=lambda x: bool(strtobool(x)))  # Full determinism (slower) vs fast mode with seeding
     parser.add_argument('--save_dir', type=str, default='./saved_models')
     parser.add_argument('--data_root', type=str, default='./')
     parser.add_argument('--desc', type=str, default='train')
     parser.add_argument('--dataset', type=str, default='cifar10')  # path to dataset
     parser.add_argument('--hparam_sets', '--hps', type=str)  # e.g. 'fewshot'
+    parser.add_argument('--model_type', type=str, default='auto', choices=['vdvae', 'unet', 'auto'])  # Model architecture: 'vdvae' for VDVAE decoder, 'unet' for UNet, 'auto' to choose based on condition_path
     parser.add_argument('--enc_blocks', type=str, default=None)  # specify encoder blocks, e.g. '1x2,4m1,4x4,8m4,8x5,16m8,16x8,32m16,32x5,64m32,64x4,128m64,128x4,256m128'
     parser.add_argument('--dec_blocks', type=str, default=None)  # specify decoder blocks, e.g. '256x4,128m64,128x4,64m32,64x4,32m16,32x5,16m8,16x8,8m4,8x5,4m1,4x4,1x2'
     parser.add_argument('--width', type=int, default=512)  # width of encoder and decoder convs
@@ -86,7 +88,7 @@ def add_imle_arguments(parser):
     parser.add_argument('--imle_factor', type=float, default=0.)  # imle soft-sampling factor -- not used in the paper
     parser.add_argument('--imle_batch', type=int, default=16)  # imle batch size used for sampling
     parser.add_argument('--subset_len', type=int, default=-1)  # subset length for training -- random subset of the dataset. -1 means full dataset
-    parser.add_argument('--latent_dim', type=int, default=4096)  # latent code dimension
+    parser.add_argument('--latent_dim', type=int, default=1024)  # latent code dimension
     parser.add_argument('--imle_perturb_coef', type=float, default=0.001)  # imle perturbation coefficient to avoid same latent codes
     parser.add_argument('--lpips_net', type=str, default='vgg')  # lpips network type
     parser.add_argument('--proj_dim', type=int, default=800)  # projection dimension for nearest neighbour search
@@ -100,14 +102,14 @@ def add_imle_arguments(parser):
     parser.add_argument('--cond_micro_batch', type=int, default=16)
     
     # look out
-    parser.add_argument('--force_factor', type=float, default=20)  # sampling factor for imle, i.e., force_factor * len(dataset)
+    parser.add_argument('--force_factor', type=float, default=5)  # sampling factor for imle, i.e., force_factor * len(dataset)
 
     parser.add_argument('--n_mpl', type=int, default=8)  # mapping network layers
 
     parser.add_argument('--reconstruct_iter_num', type=int, default=100000)  # number of iterations for reconstructing images using backtracking
 
     # look out 
-    parser.add_argument('--imle_force_resample', type=int, default=30)  # number of iterations to wait before ignoringthe threshold and resample anyway
+    parser.add_argument('--imle_force_resample', type=int, default=10)  # number of iterations to wait before ignoringthe threshold and resample anyway
     
     parser.add_argument('--snoise_factor', type=int, default=8)  # spatial noise factor
     parser.add_argument('--max_hierarchy', type=int, default=256)  # maximum hierarchy level for spatial noise, i.e., 64 means up to 64x64 spatial noise but not higher resolution
@@ -162,4 +164,5 @@ def add_imle_arguments(parser):
     parser.add_argument('--ppl_save_name', type=str, default='ppl')
     parser.add_argument("--fid_factor", type=int, default=5, help="number of the samples for calculating FID")
     parser.add_argument("--fid_freq", type=int, default=100, help="frequency of calculating fid")
+    parser.add_argument('--fid_real_dir', type=str, default=None)
     return parser
