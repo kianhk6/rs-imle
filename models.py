@@ -114,7 +114,7 @@ class Decoder(nn.Module):
         self.gain = nn.Parameter(torch.ones(1, H.image_channels, 1, 1))
         self.bias = nn.Parameter(torch.zeros(1, H.image_channels, 1, 1))
 
-    def forward(self, latent_code, spatial_noise, input_is_w=False):
+    def forward(self, latent_code, spatial_noise, input_is_w=False, return_latent_only=False):
         if not input_is_w:
             w = self.mapping_network(latent_code)[0]
         else:
@@ -125,6 +125,23 @@ class Decoder(nn.Module):
         for idx, block in enumerate(self.dec_blocks):
             noise = None
             x = block(x, w, noise)
+        
+        # x is now the latent before conversion to image channels
+        # If return_latent_only is True, return the latent before resnet/gain/bias
+        if return_latent_only:
+            return x
+        
+        # # Compute statistics over latent (before conversion to RGB)
+        # latent_flat = x.view(x.shape[0], -1)
+        # latent_mean_per_dim = latent_flat.mean(dim=0)
+        # latent_mean = latent_mean_per_dim.mean().item()
+        # latent_variance_per_dim = latent_flat.var(dim=0)
+        # latent_variance = latent_variance_per_dim.mean().item()
+        
+        # print(f"VDVAE Latent Mean (averaged across dimensions): {latent_mean:.6f}")
+        # print(f"VDVAE Latent Variance (averaged across dimensions): {latent_variance:.6f}")
+        
+        # Convert to image channels (RGB) using resnet (1x1 conv)
         x = self.resnet(x)
         x = self.gain * x + self.bias
         return x
@@ -176,7 +193,7 @@ class IMLE(nn.Module):
 
 
 
-    def forward(self, latents, spatial_noise=None, input_is_w=False, condition_data=None, condition_indices=None, return_condition=False):
+    def forward(self, latents, spatial_noise=None, input_is_w=False, condition_data=None, condition_indices=None, return_condition=False, return_latent_only=False):
         # Check if using UNet or VDVAE
         is_unet = isinstance(self.decoder, UNetModelWrapper)
         
@@ -192,12 +209,15 @@ class IMLE(nn.Module):
             if condition_data is not None:
                 condition_emb = condition_data.flatten(start_dim=1)
             
-            out = self.decoder(latents, condition_emb)
+            out = self.decoder(latents, condition_emb, return_latent_only=return_latent_only)
             
             if return_condition:
                 return out, {'condition_data': condition_data, 'condition_indices': condition_indices}
+
+            print(out.shape)
             return out
+
         else:
             # VDVAE model - uses spatial_noise instead of conditions
-            return self.decoder.forward(latents, spatial_noise, input_is_w)
+            return self.decoder.forward(latents, spatial_noise, input_is_w, return_latent_only=return_latent_only)
 

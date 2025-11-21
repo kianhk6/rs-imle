@@ -16,7 +16,7 @@ from models import parse_layer_string
 
 
 class Sampler:
-    def __init__(self, H, sz, preprocess_fn, condition_config=None):
+    def __init__(self, H, sz, preprocess_fn, condition_config=None, teacher_model=None, teacher_vae=None):
         self.pool_size = ceil(int(H.force_factor * sz) / H.imle_db_size) * H.imle_db_size
         self.preprocess_fn = preprocess_fn
         self.l2_loss = torch.nn.MSELoss(reduce=False).cuda()
@@ -25,6 +25,82 @@ class Sampler:
         self.entire_ds = torch.arange(sz)
         self.selected_latents = torch.empty([sz, H.latent_dim], dtype=torch.float32)
         self.selected_latents_tmp = torch.empty([sz, H.latent_dim], dtype=torch.float32)
+        
+        # Teacher model for dynamic data generation during resampling
+        self.teacher_model = teacher_model
+        self.teacher_vae = teacher_vae
+        self.use_teacher_resample = (teacher_model is not None) and hasattr(H, 'use_teacher_resample') and H.use_teacher_resample
+        
+        # Initialize tracking for scheduled resampling
+        self.last_teacher_resample_epoch = 0
+        
+        # Parse list-based scheduling if provided
+        self.schedule_intervals = None
+        self.schedule_transitions = None
+        if hasattr(H, 'every_n_epochs_resample_data') and H.every_n_epochs_resample_data:
+            self.schedule_intervals = [int(x.strip()) for x in H.every_n_epochs_resample_data.split(',')]
+        if hasattr(H, 'change_schedule_of_data_resampling_every_n_epoch') and H.change_schedule_of_data_resampling_every_n_epoch:
+            self.schedule_transitions = [int(x.strip()) for x in H.change_schedule_of_data_resampling_every_n_epoch.split(',')]
+        
+        # Validate schedule configuration
+        if self.schedule_intervals is not None and self.schedule_transitions is not None:
+            # Check: intervals must be N+1, transitions must be N
+            if len(self.schedule_intervals) != len(self.schedule_transitions) + 1:
+                raise ValueError(
+                    f"every_n_epochs_resample_data must have exactly ONE MORE element than change_schedule_of_data_resampling_every_n_epoch.\n"
+                    f"Got {len(self.schedule_intervals)} intervals and {len(self.schedule_transitions)} transitions.\n"
+                    f"Expected: {len(self.schedule_transitions) + 1} intervals for {len(self.schedule_transitions)} transitions."
+                )
+            
+            # Check: each interval must be <= the range it covers
+            print(f"\n{'='*70}")
+            print(f"TEACHER RESAMPLE SCHEDULE VALIDATION")
+            print(f"{'='*70}")
+            print(f"every_n_epochs_resample_data: {self.schedule_intervals}")
+            print(f"change_schedule_of_data_resampling_every_n_epoch: {self.schedule_transitions}")
+            print(f"\nSchedule breakdown:")
+            
+            # Phase 0: from 0 to first transition
+            range_length = self.schedule_transitions[0]
+            interval = self.schedule_intervals[0]
+            print(f"  Phase 1: Epoch 0 → {self.schedule_transitions[0]}")
+            print(f"    Resample every {interval} epochs")
+            if interval > range_length:
+                print(f"    ⚠️  WARNING: Interval ({interval}) > Range ({range_length})")
+                print(f"    This means only 1 resample will occur in this phase!")
+            else:
+                num_resamples = range_length // interval
+                print(f"    ✓ Expected resamples: ~{num_resamples}")
+            
+            # Middle phases
+            for i in range(len(self.schedule_transitions) - 1):
+                start = self.schedule_transitions[i]
+                end = self.schedule_transitions[i + 1]
+                range_length = end - start
+                interval = self.schedule_intervals[i + 1]
+                print(f"\n  Phase {i+2}: Epoch {start} → {end}")
+                print(f"    Resample every {interval} epochs")
+                if interval > range_length:
+                    print(f"    ⚠️  WARNING: Interval ({interval}) > Range ({range_length})")
+                    print(f"    This phase may have very few resamples!")
+                else:
+                    num_resamples = range_length // interval
+                    print(f"    ✓ Expected resamples: ~{num_resamples}")
+            
+            # Final phase
+            last_transition = self.schedule_transitions[-1]
+            last_interval = self.schedule_intervals[-1]
+            num_epochs = getattr(H, 'num_epochs', 15000)
+            range_length = num_epochs - last_transition
+            print(f"\n  Phase {len(self.schedule_transitions)+1}: Epoch {last_transition} → {num_epochs} (end)")
+            print(f"    Resample every {last_interval} epochs")
+            if last_interval > range_length:
+                print(f"    ⚠️  WARNING: Interval ({last_interval}) > Range ({range_length})")
+            else:
+                num_resamples = range_length // last_interval
+                print(f"    ✓ Expected resamples: ~{num_resamples}")
+            
+            print(f"{'='*70}\n")
 
         blocks = parse_layer_string(H.dec_blocks)
         self.block_res = [s[0] for s in blocks]
@@ -389,7 +465,15 @@ class Sampler:
                     else:
                         out = gen(cur_latents, cur_snoise, condition_data=batch_conditions)
                 else:
-                    out = gen(cur_latents, cur_snoise)                                
+                    out = gen(cur_latents, cur_snoise)
+                
+                # Calculate mean and variance of the output
+                out_flat = out.view(out.shape[0], -1)
+                out_mean_per_dim = out_flat.mean(dim=0)
+                out_mean = out_mean_per_dim.mean().item()
+                out_variance_per_dim = out_flat.var(dim=0)
+                out_variance = out_variance_per_dim.mean().item()
+                print(f"[Sampler] Output Mean (avg across dims): {out_mean:.6f}, Variance: {out_variance:.6f}")                                
                 if(logging):
                     dist, dist_lpips, dist_l2 = self.calc_loss(target.permute(0, 3, 1, 2), out, use_mean=False, logging=True)
                     dists[batch_slice] = torch.squeeze(dist)
@@ -491,44 +575,238 @@ class Sampler:
                 else:
                     self.pool_samples_proj[batch_slice] = self.get_combined_feature(generated_samples, False)
                 
-        #         # Compute variance statistics for generated_samples
-        #         # Shape: [Batch, 3, 256, 256] -> compute variance ACROSS different images (batch dimension)
-        #         # Variance across batch at each pixel/channel location
-        #         variance_across_images = torch.var(generated_samples, dim=0)  # Shape: [3, 256, 256]
-        #         # Mean of the variance (average variance across all pixel locations)
-        #         mean_variance = torch.mean(variance_across_images).item()
-        #         # Overall mean across all dimensions
-        #         overall_mean = torch.mean(generated_samples).item()
+                # # Compute variance statistics for generated_samples
+                # # Shape: [Batch, 3, 256, 256] -> compute variance ACROSS different images (batch dimension)
+                # # Variance across batch at each pixel/channel location
+                # variance_across_images = torch.var(generated_samples, dim=0)  # Shape: [3, 256, 256]
+                # # Mean of the variance (average variance across all pixel locations)
+                # mean_variance = torch.mean(variance_across_images).item()
+                # # Overall mean across all dimensions
+                # overall_mean = torch.mean(generated_samples).item()
                 
-        #         # Accumulate for overall statistics
-        #         all_variances.append(mean_variance)
-        #         all_means.append(overall_mean)
+                # # Accumulate for overall statistics
+                # all_variances.append(mean_variance)
+                # all_means.append(overall_mean)
                 
-        #         print(f"Batch {j}/{num_batches} - Shape: {generated_samples.shape}, Mean variance across images: {mean_variance:.6f}, Overall mean: {overall_mean:.6f}")
+                # print(f"Batch {j}/{num_batches} - Shape: {generated_samples.shape}, Mean variance across images: {mean_variance:.6f}, Overall mean: {overall_mean:.6f}")
         
-        # # Print overall statistics across all batches
-        # if all_variances:
-        #     avg_variance_across_batches = sum(all_variances) / len(all_variances)
-        #     avg_mean_across_batches = sum(all_means) / len(all_means)
-        #     print(f"\n=== OVERALL STATISTICS (Variance across different images) ===")
-        #     print(f"Average variance across images: {avg_variance_across_batches:.6f}")
-        #     print(f"Average of overall means: {avg_mean_across_batches:.6f}")
-        #     print(f"Total batches processed: {len(all_variances)}")
-        #     print(f"Total images: {len(all_variances) * self.H.imle_batch}\n")
+        # Print overall statistics across all batches
+        if all_variances:
+            avg_variance_across_batches = sum(all_variances) / len(all_variances)
+            avg_mean_across_batches = sum(all_means) / len(all_means)
+            print(f"\n=== OVERALL STATISTICS (Variance across different images) ===")
+            print(f"Average variance across images: {avg_variance_across_batches:.6f}")
+            print(f"Average of overall means: {avg_mean_across_batches:.6f}")
+            print(f"Total batches processed: {len(all_variances)}")
+            print(f"Total images: {len(all_variances) * self.H.imle_batch}\n")
 
         # #############                 print(generated_samples.shape) get variance here
             
 
-    def imle_sample_force(self, dataset, gen, to_update=None, condition_data=None):
+    def generate_new_data_from_teacher(self, num_teacher_steps=20, seed=None):
+        """
+        Generate new data from teacher model with new conditions.
+        Always generates exactly the number specified by teacher_num_samples parameter.
+        
+        Args:
+            num_teacher_steps: Number of steps for the ODE solver
+            seed: Optional seed for reproducible generation. If None, uses current RNG state.
+        
+        Returns:
+            new_data: Generated images [num_samples, 3, H, W]
+            new_conditions: New noise conditions [num_samples, 4, H//8, W//8]
+        """
+        if not self.use_teacher_resample:
+            return None, None
+        
+        # Get number of samples to generate (default 100)
+        num_samples = getattr(self.H, 'teacher_num_samples', 100)
+        
+        print(f"Generating {num_samples} new samples from teacher model...")
+        if seed is not None:
+            print(f"  Using seed: {seed}")
+        
+        import copy
+        from torchdyn.core import NeuralODE
+        
+        # Generate new conditions (noise in latent space) with optional seeding
+        latent_size = self.H.image_size // 8
+        
+        if seed is not None:
+            # Create a generator with the specified seed for reproducibility
+            generator = torch.Generator(device='cuda')
+            generator.manual_seed(seed)
+            new_conditions = torch.randn(
+                num_samples, 4, latent_size, latent_size, 
+                device='cuda', 
+                generator=generator
+            )
+        else:
+            # Use current RNG state (not reproducible across runs)
+            new_conditions = torch.randn(num_samples, 4, latent_size, latent_size, device='cuda')
+        
+        # Generate data from teacher using flow matching
+        teacher_copy = copy.deepcopy(self.teacher_model)
+        node = NeuralODE(teacher_copy, solver="euler", sensitivity="adjoint")
+        
+        new_data_list = []
+        batch_size = self.H.imle_batch
+        
+        with torch.no_grad():
+            for i in range(0, num_samples, batch_size):
+                end_idx = min(i + batch_size, num_samples)
+                batch_conditions = new_conditions[i:end_idx]
+                
+                # Flow matching: noise → latents
+                traj = node.trajectory(
+                    batch_conditions,
+                    t_span=torch.linspace(0, 1, num_teacher_steps, device='cuda'),
+                )
+                teacher_latents = traj[-1, :].view(batch_conditions.shape)
+                
+                # Decode latents → images
+                teacher_images = self.teacher_vae.decode(
+                    teacher_latents / self.teacher_vae.config.scaling_factor
+                ).sample
+                
+                # Denormalize from [-1, 1] to [0, 1] and then to [0, 255]
+                teacher_images = (teacher_images + 1) / 2
+                teacher_images = torch.clamp(teacher_images, 0, 1) * 255
+                
+                # Convert to uint8 and permute to [B, H, W, C]
+                teacher_images = teacher_images.byte().permute(0, 2, 3, 1).cpu()
+                
+                new_data_list.append(teacher_images)
+                
+                print(f"  Generated {end_idx}/{num_samples} samples...")
+        
+        new_data = torch.cat(new_data_list, dim=0)
+        
+        print(f"Generated {num_samples} new samples from teacher. Shape: {new_data.shape}")
+        return new_data, new_conditions.cpu()
+
+    def get_scheduled_teacher_resample_interval(self, current_epoch):
+        """
+        Compute the teacher resample interval based on a list-based schedule.
+        
+        With N+1 intervals and N transitions:
+        - intervals[0] is used from epoch 0 to transitions[0]
+        - intervals[1] is used from transitions[0] to transitions[1]
+        - intervals[i] is used from transitions[i-1] to transitions[i]
+        - intervals[N] is used from transitions[N-1] onwards
+        
+        Example:
+          intervals = [800, 200, 100, 50]  (N+1 = 4 elements)
+          transitions = [800, 2000, 6000]  (N = 3 elements)
+          
+          epoch 0-800: use 800 (resample every 800, so only at epoch 800)
+          epoch 800-2000: use 200 (resample every 200)
+          epoch 2000-6000: use 100 (resample every 100)
+          epoch 6000+: use 50 (resample every 50)
+        
+        Returns the number of epochs until the next resample should occur.
+        """
+        if not hasattr(self.H, 'use_teacher_resample_schedule') or not self.H.use_teacher_resample_schedule:
+            # If scheduling is disabled, return the fixed value
+            return getattr(self.H, 'teacher_force_resample', None)
+        
+        # Use list-based scheduling if available
+        if self.schedule_intervals is not None and self.schedule_transitions is not None:
+            # Find which phase we're in based on current epoch
+            for i, transition_epoch in enumerate(self.schedule_transitions):
+                if current_epoch < transition_epoch:
+                    return self.schedule_intervals[i]
+            # If we're past all transitions, use the last interval
+            return self.schedule_intervals[-1]
+        
+        # Fallback: if no lists provided, return None (shouldn't happen if validation works)
+        return None
+    
+    def should_teacher_resample(self, current_epoch):
+        """
+        Determine if teacher resampling should occur at the current epoch.
+        """
+        if not self.use_teacher_resample:
+            return False
+        
+        # Check if scheduling is enabled
+        if hasattr(self.H, 'use_teacher_resample_schedule') and self.H.use_teacher_resample_schedule:
+            # Use scheduled resampling
+            interval = self.get_scheduled_teacher_resample_interval(current_epoch)
+            epochs_since_last = current_epoch - self.last_teacher_resample_epoch
+            
+            if epochs_since_last >= interval:
+                return True
+            return False
+        else:
+            # Use fixed interval from teacher_force_resample
+            teacher_force_resample = getattr(self.H, 'teacher_force_resample', None)
+            
+            if teacher_force_resample is not None and current_epoch is not None:
+                # Force complete renewal every teacher_force_resample epochs
+                if current_epoch % teacher_force_resample == 0:
+                    return True
+            else:
+                # Default behavior: resample on every resampling step
+                return True
+            
+            return False
+
+    def imle_sample_force(self, dataset, gen, to_update=None, condition_data=None, epoch=None):
         if to_update is None:
             to_update = self.entire_ds
         if to_update.shape[0] == 0:
-            return
+            return None, None  # Return None for new data and conditions
         
         to_update = to_update.cpu()
 
         t1 = time.time()
+        new_data, new_conditions = None, None
+        
         if torch.any(self.sample_pool_usage[to_update]):
+            # Check if we should generate new data from teacher using the new scheduling logic
+            if epoch is not None and self.should_teacher_resample(epoch):
+                # Use global seed + epoch for deterministic teacher resampling
+                teacher_seed = self.H.seed + epoch if hasattr(self.H, 'seed') else None
+                new_data, new_conditions = self.generate_new_data_from_teacher(
+                    num_teacher_steps=getattr(self.H, 'teacher_resample_steps', 20),
+                    seed=teacher_seed
+                )
+                
+                # Update the last resample epoch
+                self.last_teacher_resample_epoch = epoch
+                
+                # Get the interval for logging
+                if hasattr(self.H, 'use_teacher_resample_schedule') and self.H.use_teacher_resample_schedule:
+                    interval = self.get_scheduled_teacher_resample_interval(epoch)
+                    
+                    # Determine which phase we're in
+                    if self.schedule_intervals is not None and self.schedule_transitions is not None:
+                        # Find current phase index
+                        phase_idx = len(self.schedule_intervals) - 1  # default to last phase
+                        for i, transition_epoch in enumerate(self.schedule_transitions):
+                            if epoch < transition_epoch:
+                                phase_idx = i
+                                break
+                        
+                        # Check if this is the first resample (at transitions[0])
+                        if epoch == self.schedule_transitions[0] and self.last_teacher_resample_epoch == 0:
+                            phase_name = "initial"
+                        else:
+                            phase_name = f"phase{phase_idx + 1}"
+                    else:
+                        phase_name = "unknown"
+                        phase_idx = 0
+                    
+                    print(f'[Epoch {epoch}] Forcing complete dataset renewal (scheduled: {phase_name}, interval={interval})')
+                    if self.schedule_transitions:
+                        print(f'  Schedule: intervals={self.schedule_intervals}, transitions={self.schedule_transitions}')
+                else:
+                    teacher_force_resample = getattr(self.H, 'teacher_force_resample', None)
+                    print(f'[Epoch {epoch}] Forcing complete dataset renewal (teacher_force_resample={teacher_force_resample})')
+                
+                print(f'Teacher-based resampling generated new data: {new_data.shape if new_data is not None else None}')
+            
             self.resample_pool(gen, dataset)
             self.sample_pool_usage[:] = False
             print(f'resampling took {time.time() - t1}')
@@ -582,7 +860,12 @@ class Sampler:
             self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
             
             print(f'Force resampling took {time.time() - t1}')
-            return
+            
+            # Stop collecting latent statistics after first resampling
+            if hasattr(gen.module, 'stop_collecting_stats'):
+                gen.module.stop_collecting_stats()
+            
+            return new_data, new_conditions
 
         
         else: 
@@ -661,4 +944,10 @@ class Sampler:
                 self.selected_latents[to_update] = self.selected_latents_tmp[to_update]
 
         print(f'Force resampling took {time.time() - t1}')
+        
+        # Stop collecting latent statistics after first resampling
+        if hasattr(gen.module, 'stop_collecting_stats'):
+            gen.module.stop_collecting_stats()
+        
+        return new_data, new_conditions
     

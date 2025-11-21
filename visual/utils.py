@@ -63,16 +63,10 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
                 tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
             else:
                 tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-            # Subsequent rows: step through next condition windows of size mb
-            start = (t + 1) * mb
-            end = start + mb
-            if condition_data.shape[0] >= end:
-                cur_cond = condition_data[start:end]
-            else:
-                idx = torch.arange(start, end) % max(1, condition_data.shape[0])
-                cur_cond = condition_data[idx]
+            # Subsequent rows: use random noise as condition instead of actual condition_data
+            random_cond = torch.randn_like(condition_data[:mb])
 
-            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=cur_cond))
+            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=random_cond))
             
         n_rows = len(batches)
         im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
@@ -82,12 +76,12 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, overwrite=True)
+                experiment.log_image(fname, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
                 # Log numpy array directly to comet without saving to file
-                experiment.log_image(im, name=fname, overwrite=True)
+                experiment.log_image(im, name=fname, overwrite=False)
     else:
         batches = [orig[:mb], sampler.sample(initial, imle, snoise)]
         temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
@@ -105,12 +99,12 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, overwrite=True)
+                experiment.log_image(fname, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
                 # Log numpy array directly to comet without saving to file
-                experiment.log_image(im, name=fname, overwrite=True)
+                experiment.log_image(im, name=fname, overwrite=False)
 
 
 
@@ -125,6 +119,10 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
             for i in range(0, (n_samp // H.imle_batch)+1):
                 
                 batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
+                
+                # Skip if batch_size is 0 or negative
+                if batch_size <= 0:
+                    continue
                 
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
@@ -156,6 +154,10 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
             for i in range(0, (n_samp // H.imle_batch)+1):
                 
                 batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
+                
+                # Skip if batch_size is 0 or negative
+                if batch_size <= 0:
+                    continue
 
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]

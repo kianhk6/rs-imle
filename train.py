@@ -89,15 +89,82 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
     if subset_len == -1:
         subset_len = len(data_train)
     
+    # Load teacher model and VAE if teacher resampling is enabled
+    teacher_model = None
+    teacher_vae = None
+    
+    if hasattr(H, 'use_teacher_resample') and H.use_teacher_resample:
+        print("Loading teacher model for dynamic resampling...")
+        import sys
+        import importlib.util
+        import copy
+        from diffusers import AutoencoderKL
+        from torchdyn.core import NeuralODE
+        
+        # Load teacher UNet by adding the package to sys.path and importing normally
+        sys.path.insert(0, '/home/kha98/Desktop/conditional-flow-matching')
+        try:
+            from torchcfm.models.unet.unet import UNetModelWrapper as TeacherUNet
+        finally:
+            # Remove from path after loading
+            sys.path.remove('/home/kha98/Desktop/conditional-flow-matching')
+        
+        teacher_model = TeacherUNet(
+            dim=(4, H.image_size // 8, H.image_size // 8),
+            num_res_blocks=2,
+            num_channels=128,
+            channel_mult=[1, 2, 2, 2],
+            num_heads=4,
+            num_head_channels=64,
+            attention_resolutions="16",
+            dropout=0.1,
+        ).to('cuda')
+        
+        # Load checkpoint
+        teacher_checkpoint_path = getattr(H, 'teacher_checkpoint_path', 
+            '/home/kha98/Desktop/flow-model-chirag/output_flow/flow-ffhq-debugfm/fm_cifar10_weights_step_84000.pt')
+        ckpt = torch.load(teacher_checkpoint_path, map_location='cuda')
+        teacher_model.load_state_dict(ckpt['ema_model'])
+        teacher_model.eval()
+        for param in teacher_model.parameters():
+            param.requires_grad = False
+        
+        # Load VAE for decoding
+        teacher_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to('cuda')
+        teacher_vae.eval()
+        for param in teacher_vae.parameters():
+            param.requires_grad = False
+        
+        print("Teacher model and VAE loaded successfully!")
+        
+        # Check if we should generate initial data
+        if hasattr(H, 'teacher_generate_initial_data') and H.teacher_generate_initial_data:
+            print("Will generate INITIAL dataset from teacher at epoch 0, then regenerate during resampling")
+        else:
+            print("Will use existing data/conditions initially, then regenerate during resampling")
+        
+        # Validate teacher_force_resample parameter
+        if hasattr(H, 'teacher_force_resample') and H.teacher_force_resample is not None:
+            if H.teacher_force_resample % H.imle_force_resample != 0:
+                raise ValueError(
+                    f"teacher_force_resample ({H.teacher_force_resample}) must be a multiple of "
+                    f"imle_force_resample ({H.imle_force_resample})"
+                )
+            print(f"Teacher force resample enabled: will renew dataset every {H.teacher_force_resample} epochs")
+    
     if condition_data is not None:
         sampler = Sampler(
             H,
             subset_len,
             preprocess_fn,
             condition_config={"condition_tensor": condition_data},
+            teacher_model=teacher_model,
+            teacher_vae=teacher_vae,
         )
     else:
-        sampler = Sampler(H, subset_len, preprocess_fn)
+        sampler = Sampler(H, subset_len, preprocess_fn, 
+                         teacher_model=teacher_model, 
+                         teacher_vae=teacher_vae)
 
     last_updated = torch.zeros(subset_len, dtype=torch.int16).cuda()
     times_updated = torch.zeros(subset_len, dtype=torch.int8).cuda()
@@ -133,6 +200,44 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             print(f'Split {split_ind}: data shape {split_x_tensor.shape}, condition shape {split_condition_data.shape}')
 
         print('Outer batch - {}'.format(split_ind, len(split_x)))
+        
+        # Generate initial dataset from teacher if requested (epoch 0)
+        if (hasattr(H, 'teacher_generate_initial_data') and H.teacher_generate_initial_data and 
+            teacher_model is not None and epoch == starting_epoch - 1):
+            print(f"\n{'='*70}")
+            print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch 0)")
+            print(f"{'='*70}")
+            
+            # Generate new data and conditions from teacher with deterministic seed
+            # Use global seed + epoch for reproducibility
+            teacher_seed = H.seed + epoch if hasattr(H, 'seed') else None
+            new_data, new_conditions = sampler.generate_new_data_from_teacher(
+                num_teacher_steps=getattr(H, 'teacher_resample_steps', 20),
+                seed=teacher_seed
+            )
+            
+            if new_data is not None and new_conditions is not None:
+                print(f"Generated initial dataset: {new_data.shape}")
+                # Update the tensor data
+                split_x_tensor[:] = new_data
+                # Update the TensorDataset
+                split_x = TensorDataset(split_x_tensor)
+                # Re-initialize projection with new data
+                sampler.init_projection(split_x_tensor)
+                # Update visualization batch
+                viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
+                
+                if split_condition_data is not None:
+                    split_condition_data[:] = new_conditions
+                    # Also update the global condition_data
+                    if condition_data is not None:
+                        condition_tensor = condition_data.tensors[0]
+                        start_idx = split_ind * subset_len
+                        end_idx = min(start_idx + subset_len, len(condition_tensor))
+                        condition_tensor[start_idx:end_idx] = new_conditions.cpu()
+                        print(f"Updated initial conditions: {new_conditions.shape}")
+                
+                print(f"{'='*70}\n")
 
         while (epoch < H.num_epochs):
             
@@ -188,9 +293,33 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             
             # Pass the corresponding condition data split to imle_sample_force
             if split_condition_data is not None:
-                sampler.imle_sample_force(split_x_tensor, imle, to_update, condition_data=split_condition_data)
+                print("hello first is here")
+                new_data, new_conditions = sampler.imle_sample_force(split_x_tensor, imle, to_update, condition_data=split_condition_data, epoch=epoch)
             else:
-                sampler.imle_sample_force(split_x_tensor, imle, to_update)
+                new_data, new_conditions = sampler.imle_sample_force(split_x_tensor, imle, to_update, epoch=epoch)
+            
+            # Update dataset and conditions if teacher resampling generated new data
+            if new_data is not None and new_conditions is not None:
+                print(f"Updating dataset with new teacher-generated data: {new_data.shape}")
+                # Update the tensor data
+                split_x_tensor[:] = new_data
+                # Update the TensorDataset
+                split_x = TensorDataset(split_x_tensor)
+                # Re-initialize projection with new data
+                sampler.init_projection(split_x_tensor)
+                # Update visualization batch to show the new resampled data
+                viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
+                
+                if split_condition_data is not None:
+                    split_condition_data[:] = new_conditions
+                    # Also update the global condition_data (extract tensor from TensorDataset)
+                    if condition_data is not None:
+                        # Get the underlying tensor from TensorDataset
+                        condition_tensor = condition_data.tensors[0]
+                        start_idx = split_ind * subset_len
+                        end_idx = min(start_idx + subset_len, len(condition_tensor))
+                        condition_tensor[start_idx:end_idx] = new_conditions.cpu()
+                        print(f"Updated conditions: {new_conditions.shape}")
             
 
             to_update = to_update.cpu()
@@ -274,7 +403,9 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
 
 
-                if(iterate <= H.warmup_iters):
+                # Only step scheduler during warmup if using iteration-based scheduler
+                use_dynamic_scheduler = getattr(H, 'use_teacher_resample', False) and getattr(H, 'teacher_force_resample', None) is not None
+                if(iterate <= H.warmup_iters and not use_dynamic_scheduler):
                     # print("Warmup iteration: ", iterate)
                     scheduler.step()
 
@@ -314,7 +445,13 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
             print(f'Epoch {epoch} took {time.time() - start_time} seconds')
 
-            if(iterate > H.warmup_iters):
+            # Step scheduler at end of epoch
+            use_dynamic_scheduler = getattr(H, 'use_teacher_resample', False) and getattr(H, 'teacher_force_resample', None) is not None
+            if use_dynamic_scheduler:
+                # For CosineAnnealingWarmRestarts, step every epoch
+                scheduler.step()
+            elif iterate > H.warmup_iters:
+                # For original StepLR, step after warmup
                 scheduler.step()
 
             
@@ -323,6 +460,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             cur_dists_l2 = torch.empty([subset_len], dtype=torch.float32).cuda()
 
             if condition_data != None:
+                print("first call is here!")
                 cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(split_x_tensor, imle, 
                                                                                                 dists=cur_dists,  
                                                                                                 dists_lpips=cur_dists_lpips,
@@ -483,14 +621,48 @@ def main(H=None):
             sampler = Sampler(H, len(data_train), preprocess_fn)
             n_samp = H.n_batch
             temp_latent_rnds = torch.randn([n_samp, H.latent_dim], dtype=torch.float32).cuda()
+            
+            # Use EMA model if ema weights were loaded, otherwise use regular model
+            model_to_use = ema_imle if H.restore_ema_path else imle
+            
             for i in range(0, H.num_images_to_generate // n_samp):
                 if (i % 10 == 0):
                     print(i * n_samp)
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:n_samp].normal_() for s in sampler.snoise_tmp]
-                torch.save(temp_latent_rnds, f'{H.save_dir}/eval/temp_latent_rnds_{i}.pt')
-                torch.save(tmp_snoise, f'{H.save_dir}/eval/tmp_snoise_{i}.pt')
-                samp = sampler.sample(temp_latent_rnds, imle, tmp_snoise)
+                
+                # Save latents and snoise (with error handling for large files)
+                try:
+                    torch.save(temp_latent_rnds.cpu(), f'{H.save_dir}/eval/temp_latent_rnds_{i}.pt')
+                except Exception as e:
+                    print(f"Warning: Could not save latent_rnds_{i}: {e}")
+                
+                try:
+                    # Save snoise as a list of CPU tensors to avoid serialization issues
+                    torch.save([s.cpu() for s in tmp_snoise], f'{H.save_dir}/eval/tmp_snoise_{i}.pt')
+                except Exception as e:
+                    print(f"Warning: Could not save tmp_snoise_{i}: {e}")
+                
+                # For conditional models, generate random noise as conditions
+                if condition_data is not None:
+                    # Get a sample from condition_data to determine shape
+                    if hasattr(condition_data, 'tensors'):
+                        # TensorDataset - access the first tensor
+                        sample_cond = condition_data.tensors[0][:n_samp]
+                    else:
+                        # Regular tensor
+                        sample_cond = condition_data[:n_samp]
+                    
+                    # Use random noise as condition instead of actual condition_data
+                    random_cond = torch.randn_like(sample_cond).cuda()
+                    try:
+                        torch.save(random_cond.cpu(), f'{H.save_dir}/eval/random_conditions_{i}.pt')
+                    except Exception as e:
+                        print(f"Warning: Could not save random_conditions_{i}: {e}")
+                    samp = sampler.sample(temp_latent_rnds, model_to_use, tmp_snoise, condition_data=random_cond)
+                else:
+                    samp = sampler.sample(temp_latent_rnds, model_to_use, tmp_snoise)
+                
                 for j in range(n_samp):
                     imageio.imwrite(f'{H.save_dir}/eval/{i * n_samp + j}.png', samp[j])
 

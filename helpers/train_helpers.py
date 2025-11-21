@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.optim import AdamW
 from models import IMLE
 from torch.nn.parallel.distributed import DistributedDataParallel
-from torch.optim.lr_scheduler import LambdaLR, StepLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR, StepLR, SequentialLR, CosineAnnealingWarmRestarts
 
 
 def update_ema(imle, ema_imle, ema_rate):
@@ -66,6 +66,69 @@ def linear_warmup(warmup_iters):
     return f
 
 
+class PiecewiseConstantWithRestart:
+    """
+    Piecewise constant scheduler with gentle tail decay and restart at resample boundaries.
+    
+    Args:
+        optimizer: PyTorch optimizer
+        resample_period: Number of epochs between resamples (e.g., 800)
+        base_lr: Base learning rate to restart to
+        lr_min: Minimum learning rate floor
+        tail_epochs: Number of epochs before resample to start decay (e.g., 200)
+        tail_decay: Decay factor per epoch during tail (e.g., 0.99)
+    """
+    def __init__(self, optimizer, resample_period=800, base_lr=2e-4, lr_min=1e-5, 
+                 tail_epochs=200, tail_decay=0.99):
+        self.optimizer = optimizer
+        self.resample_period = resample_period
+        self.base_lr = base_lr
+        self.lr_min = lr_min
+        self.tail_epochs = tail_epochs
+        self.tail_decay = tail_decay
+        self.epoch = 0
+        
+    def step(self):
+        """Step the scheduler (call once per epoch)"""
+        pos = self.epoch % self.resample_period
+        
+        if pos == 0 and self.epoch > 0:
+            # Just resampled - reset to base LR
+            lr = self.base_lr
+        elif pos < self.resample_period - self.tail_epochs:
+            # Constant phase
+            lr = self.base_lr
+        else:
+            # Tail decay phase
+            decay_steps = pos - (self.resample_period - self.tail_epochs)
+            lr = max(self.base_lr * (self.tail_decay ** decay_steps), self.lr_min)
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        self.epoch += 1
+        
+    def state_dict(self):
+        """Return state dict for checkpointing"""
+        return {
+            'epoch': self.epoch,
+            'resample_period': self.resample_period,
+            'base_lr': self.base_lr,
+            'lr_min': self.lr_min,
+            'tail_epochs': self.tail_epochs,
+            'tail_decay': self.tail_decay,
+        }
+    
+    def load_state_dict(self, state_dict):
+        """Load state dict from checkpoint"""
+        self.epoch = state_dict['epoch']
+        self.resample_period = state_dict['resample_period']
+        self.base_lr = state_dict['base_lr']
+        self.lr_min = state_dict['lr_min']
+        self.tail_epochs = state_dict['tail_epochs']
+        self.tail_decay = state_dict['tail_decay']
+
+
 
 def distributed_maybe_download(path, local_rank, mpi_size):
     if not path.startswith('gs://'):
@@ -105,7 +168,7 @@ def set_up_hyperparams(s=None):
     for i, k in enumerate(sorted(H)):
         logprint(type='hparam', key=k, value=H[k])
     
-    # # # # Comprehensive seeding for reproducibility
+    # # # # # Comprehensive seeding for reproducibility
     deterministic_mode = getattr(H, 'deterministic_mode', False)
     seed_everything(H.seed, deterministic_mode=deterministic_mode)
     
@@ -168,9 +231,53 @@ def load_imle(H, logprint):
 
 def load_opt(H, imle, logprint):
     optimizer = AdamW(imle.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
-    scheduler1 = LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
-    scheduler2 = StepLR(optimizer, step_size=H.lr_decay_iters, gamma=H.lr_decay_rate)
-    scheduler = SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[H.warmup_iters])
+    
+    # Check if we should use restarting scheduler (controlled by hyperparameter)
+    use_restarting_scheduler = getattr(H, 'use_restarting_scheduler', False)
+    
+    if use_restarting_scheduler:
+        # Require teacher_force_resample to be set for restarting scheduler
+        if getattr(H, 'teacher_force_resample', None) is None:
+            raise ValueError('use_restarting_scheduler=True requires teacher_force_resample to be set')
+        resample_period = H.teacher_force_resample
+        eta_min = getattr(H, 'lr_min', 1e-5)
+        scheduler_type = getattr(H, 'dynamic_scheduler_type', 'cosine')  # 'cosine' or 'piecewise'
+        
+        if scheduler_type == 'piecewise':
+            # Option 2: Piecewise constant with tail decay and restart
+            tail_epochs = getattr(H, 'lr_tail_epochs', 200)
+            tail_decay = getattr(H, 'lr_tail_decay', 0.99)
+            
+            logprint(f'Using PiecewiseConstantWithRestart scheduler:')
+            logprint(f'  - Resample period: {resample_period} epochs')
+            logprint(f'  - Base LR: {H.lr}, Min LR: {eta_min}')
+            logprint(f'  - Constant phase: epochs 0-{resample_period - tail_epochs}')
+            logprint(f'  - Tail decay: last {tail_epochs} epochs with decay={tail_decay}')
+            logprint(f'  - LR restarts to {H.lr} at each resample boundary')
+            
+            scheduler = PiecewiseConstantWithRestart(
+                optimizer, 
+                resample_period=resample_period,
+                base_lr=H.lr,
+                lr_min=eta_min,
+                tail_epochs=tail_epochs,
+                tail_decay=tail_decay
+            )
+        else:
+            # Option 1: Cosine Annealing with Warm Restarts (default)
+            logprint(f'Using CosineAnnealingWarmRestarts scheduler:')
+            logprint(f'  - T_0={resample_period} epochs, eta_min={eta_min}')
+            logprint(f'  - LR will smoothly decay from {H.lr} to {eta_min} over {resample_period} epochs')
+            logprint(f'  - LR restarts to {H.lr} every {resample_period} epochs (aligned with teacher resampling)')
+            
+            # Note: CosineAnnealingWarmRestarts expects step() to be called per epoch
+            scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=resample_period, T_mult=1, eta_min=eta_min)
+    else:
+        # Original scheduler for fixed dataset runs
+        logprint('Using original StepLR scheduler (iteration-based)')
+        scheduler1 = LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+        scheduler2 = StepLR(optimizer, step_size=H.lr_decay_iters, gamma=H.lr_decay_rate)
+        scheduler = SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[H.warmup_iters])
 
     if H.restore_optimizer_path:
         optimizer.load_state_dict(
