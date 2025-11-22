@@ -4,7 +4,6 @@ import time
 from comet_ml import Experiment, ExistingExperiment
 import imageio
 import torch
-import wandb
 import torch.nn as nn
 from cleanfid import fid
 from torch.utils.data import DataLoader, TensorDataset
@@ -99,7 +98,6 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
         import importlib.util
         import copy
         from diffusers import AutoencoderKL
-        from torchdyn.core import NeuralODE
         
         # Load teacher UNet by adding the package to sys.path and importing normally
         sys.path.insert(0, '/home/kha98/Desktop/conditional-flow-matching')
@@ -152,19 +150,36 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 )
             print(f"Teacher force resample enabled: will renew dataset every {H.teacher_force_resample} epochs")
     
+    print(f"Initializing Sampler with subset_len={subset_len}...", flush=True)
+    
+    # Check if using teacher mode with placeholder data
+    use_teacher_init = (hasattr(H, 'teacher_generate_initial_data') and 
+                        H.teacher_generate_initial_data and
+                        hasattr(H, 'use_teacher_resample') and 
+                        H.use_teacher_resample)
     if condition_data is not None:
-        sampler = Sampler(
-            H,
-            subset_len,
-            preprocess_fn,
-            condition_config={"condition_tensor": condition_data},
-            teacher_model=teacher_model,
-            teacher_vae=teacher_vae,
-        )
+        if use_teacher_init:
+            # Skip condition configuration for placeholder data (will configure after teacher generation)
+            print(f"  Skipping condition configuration (placeholder data)", flush=True)
+            sampler = Sampler(H, subset_len, preprocess_fn, 
+                            teacher_model=teacher_model, 
+                            teacher_vae=teacher_vae)
+        else:
+            print(f"  With condition_data (size: {len(condition_data)})", flush=True)
+            sampler = Sampler(
+                H,
+                subset_len,
+                preprocess_fn,
+                condition_config={"condition_tensor": condition_data},
+                teacher_model=teacher_model,
+                teacher_vae=teacher_vae,
+            )
     else:
+        print(f"  Without condition_data", flush=True)
         sampler = Sampler(H, subset_len, preprocess_fn, 
                          teacher_model=teacher_model, 
                          teacher_vae=teacher_vae)
+    print(f"Sampler initialized successfully!", flush=True)
 
     last_updated = torch.zeros(subset_len, dtype=torch.int16).cuda()
     times_updated = torch.zeros(subset_len, dtype=torch.int8).cuda()
@@ -173,11 +188,23 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
     best_fid = 100000
     epoch = starting_epoch - 1
 
+    print(f"Starting training loop...", flush=True)
     for split_ind, split_x_tensor in enumerate(DataLoader(data_train, batch_size=subset_len, pin_memory=True)):
+        print(f"Processing split {split_ind}, data shape: {split_x_tensor[0].shape}", flush=True)
         split_x_tensor = split_x_tensor[0].contiguous()
         split_x = TensorDataset(split_x_tensor)
-        sampler.init_projection(split_x_tensor)
+        
+        # Skip projection initialization if using placeholder data (will init after teacher generation)
+        if use_teacher_init and epoch == starting_epoch - 1:
+            print(f"Skipping projection initialization (placeholder data - will init after teacher generation)", flush=True)
+        else:
+            print(f"Initializing projection...", flush=True)
+            sampler.init_projection(split_x_tensor)
+            print(f"Projection initialized!", flush=True)
+            
+        print(f"Getting visualization batch...", flush=True)
         viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
+        print(f"Split {split_ind} preparation complete!", flush=True)
 
         # Extract corresponding split from condition_data
         split_condition_data = None
@@ -204,9 +231,9 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
         # Generate initial dataset from teacher if requested (epoch 0)
         if (hasattr(H, 'teacher_generate_initial_data') and H.teacher_generate_initial_data and 
             teacher_model is not None and epoch == starting_epoch - 1):
-            print(f"\n{'='*70}")
-            print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch 0)")
-            print(f"{'='*70}")
+            print(f"\n{'='*70}", flush=True)
+            print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch 0)", flush=True)
+            print(f"{'='*70}", flush=True)
             
             # Generate new data and conditions from teacher with deterministic seed
             # Use global seed + epoch for reproducibility
@@ -217,34 +244,113 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             )
             
             if new_data is not None and new_conditions is not None:
-                print(f"Generated initial dataset: {new_data.shape}")
-                # Update the tensor data
-                split_x_tensor[:] = new_data
-                # Update the TensorDataset
-                split_x = TensorDataset(split_x_tensor)
-                # Re-initialize projection with new data
-                sampler.init_projection(split_x_tensor)
-                # Update visualization batch
-                viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
-                
-                if split_condition_data is not None:
-                    split_condition_data[:] = new_conditions
-                    # Also update the global condition_data
-                    if condition_data is not None:
-                        condition_tensor = condition_data.tensors[0]
-                        start_idx = split_ind * subset_len
-                        end_idx = min(start_idx + subset_len, len(condition_tensor))
-                        condition_tensor[start_idx:end_idx] = new_conditions.cpu()
-                        print(f"Updated initial conditions: {new_conditions.shape}")
-                
-                print(f"{'='*70}\n")
+                print(f"Generated initial dataset: {new_data.shape}", flush=True)
+                print(f"Updating training data with teacher-generated samples...", flush=True)
 
+                # Update global dataset or just this split depending on what teacher returned.
+                # `data_train` is a TensorDataset; its backing tensor is at data_train.tensors[0]
+                try:
+                    global_dataset = data_train.tensors[0]
+                except Exception:
+                    global_dataset = None
+
+                n_new = new_data.shape[0]
+                n_split = split_x_tensor.shape[0]
+                n_global = global_dataset.shape[0] if global_dataset is not None else None
+
+                start_idx = split_ind * subset_len
+                end_idx = min(start_idx + subset_len, n_global) if n_global is not None else n_split
+
+                # Case 1: teacher returned a full-dataset update
+                if n_global is not None and n_new == n_global:
+                    # Replace entire dataset and then refresh this split
+                    global_dataset[:] = new_data
+                    split_x_tensor[:] = global_dataset[start_idx:end_idx]
+                # Case 2: teacher returned exactly the split-size
+                elif n_new == n_split:
+                    split_x_tensor[:] = new_data
+                    if global_dataset is not None:
+                        global_dataset[start_idx:end_idx] = new_data
+                # Case 3: teacher returned more than the split but not equal to global - try to fill global when possible
+                elif n_global is not None and n_new >= n_global:
+                    global_dataset[:] = new_data[:n_global]
+                    split_x_tensor[:] = global_dataset[start_idx:end_idx]
+                else:
+                    # Fallback: truncate or pad the new data to fit the current split
+                    split_x_tensor[:] = new_data[:n_split]
+                    if global_dataset is not None and n_new >= (end_idx - start_idx):
+                        global_dataset[start_idx:end_idx] = new_data[:(end_idx - start_idx)]
+
+                # Update the TensorDataset and re-init projection with the (possibly) new data
+                split_x = TensorDataset(split_x_tensor)
+                print(f"Initializing projections with real teacher-generated data...", flush=True)
+                sampler.init_projection(split_x_tensor)
+                print(f"Projections initialized successfully!", flush=True)
+                
+                # Configure conditions with real teacher-generated data
+                if condition_data is not None:
+                    print(f"Configuring conditions with real teacher-generated data...", flush=True)
+                    sampler.configure_conditions(sz=subset_len, condition_tensor=condition_data)
+                    print(f"Conditions configured successfully!", flush=True)
+                    
+                    # Update split_condition_data with the new teacher-generated conditions
+                    print(f"Updating split_condition_data with teacher-generated conditions...", flush=True)
+                    split_conditions = []
+                    for idx in split_indices:
+                        condition_sample = condition_data[idx]
+                        if isinstance(condition_sample, tuple):
+                            split_conditions.append(condition_sample[0])
+                        else:
+                            split_conditions.append(condition_sample)
+                    split_condition_data = torch.stack(split_conditions).cuda()
+                    print(f"split_condition_data updated! Shape: {split_condition_data.shape}", flush=True)
+                
+                print(f"Getting visualization batch after teacher generation...", flush=True)
+                viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
+                print(f"Visualization batch obtained!", flush=True)
+
+                print(f"Updating split_condition_data with teacher conditions...", flush=True)
+                # Update conditions similarly
+                if split_condition_data is not None:
+                    try:
+                        cond_global = condition_data.tensors[0]
+                    except Exception:
+                        cond_global = None
+
+                    n_cond_new = new_conditions.shape[0]
+                    if cond_global is not None and n_cond_new == cond_global.shape[0]:
+                        cond_global[:] = new_conditions.cpu()
+                        split_condition_data[:] = cond_global[start_idx:end_idx].cuda()
+                    elif n_cond_new == n_split:
+                        split_condition_data[:] = new_conditions.cuda()
+                        if cond_global is not None:
+                            cond_global[start_idx:end_idx] = new_conditions.cpu()
+                    elif cond_global is not None and n_cond_new >= cond_global.shape[0]:
+                        cond_global[:] = new_conditions[:cond_global.shape[0]].cpu()
+                        split_condition_data[:] = cond_global[start_idx:end_idx].cuda()
+                    else:
+                        split_condition_data[:] = new_conditions[:n_split].cuda()
+
+                    if cond_global is not None:
+                        print(f"Updated initial conditions: {new_conditions.shape}", flush=True)
+                else:
+                    print(f"split_condition_data is None, skipping condition update", flush=True)
+
+                print(f"{'='*70}\n", flush=True)
+                print(f"Initial dataset generation and setup complete! Starting training epochs...", flush=True)
+
+        print(f"Entering main training loop (epoch={epoch}, num_epochs={H.num_epochs})...", flush=True)
         while (epoch < H.num_epochs):
             
             epoch += 1
+            print(f"\n{'*'*70}", flush=True)
+            print(f"Starting Epoch {epoch}", flush=True)
+            print(f"{'*'*70}\n", flush=True)
             last_updated[:] = last_updated + 1
 
+            print(f"Calculating existing distances for {len(split_x_tensor)} samples...", flush=True)
             if split_condition_data is not None:
+                print(f"  With conditions (shape: {split_condition_data.shape})", flush=True)
                 sampler.selected_dists[:] = sampler.calc_dists_existing(
                     split_x_tensor,
                     imle,
@@ -252,7 +358,10 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                     conditions=(split_condition_data, split_indices.cuda())
                 )
             else:
+                print(f"  Without conditions", flush=True)
                 sampler.selected_dists[:] = sampler.calc_dists_existing(split_x_tensor, imle, dists=sampler.selected_dists)
+            print(f"Distance calculation complete!", flush=True)
+            print(f"Determining which samples to update...", flush=True)
             dists_in_threshold = sampler.selected_dists < change_thresholds
             updated_enough = last_updated >= H.imle_staleness
             updated_too_much = last_updated >= H.imle_force_resample
@@ -266,6 +375,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 
             # all_conditions = torch.logical_or(in_threshold, updated_too_much)
             to_update = torch.nonzero(all_conditions, as_tuple=False).squeeze(1)
+            print(f"Samples to update: {len(to_update)}/{len(split_x_tensor)}", flush=True)
 
             if (epoch == starting_epoch):
                 if os.path.isfile(str(H.restore_latent_path)):
@@ -291,34 +401,70 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
 
             change_thresholds[to_update] = sampler.selected_dists[to_update].clone() * (1 - H.change_coef)
             
+            print(f"Running IMLE sampling for {len(to_update)} samples...", flush=True)
             # Pass the corresponding condition data split to imle_sample_force
             if split_condition_data is not None:
-                print("hello first is here")
                 new_data, new_conditions = sampler.imle_sample_force(split_x_tensor, imle, to_update, condition_data=split_condition_data, epoch=epoch)
             else:
                 new_data, new_conditions = sampler.imle_sample_force(split_x_tensor, imle, to_update, epoch=epoch)
+            print(f"IMLE sampling complete!", flush=True)
             
             # Update dataset and conditions if teacher resampling generated new data
             if new_data is not None and new_conditions is not None:
                 print(f"Updating dataset with new teacher-generated data: {new_data.shape}")
-                # Update the tensor data
-                split_x_tensor[:] = new_data
-                # Update the TensorDataset
+
+                try:
+                    global_dataset = data_train.tensors[0]
+                except Exception:
+                    global_dataset = None
+
+                n_new = new_data.shape[0]
+                n_split = split_x_tensor.shape[0]
+                n_global = global_dataset.shape[0] if global_dataset is not None else None
+
+                start_idx = split_ind * subset_len
+                end_idx = min(start_idx + subset_len, n_global) if n_global is not None else n_split
+
+                if n_global is not None and n_new == n_global:
+                    global_dataset[:] = new_data
+                    split_x_tensor[:] = global_dataset[start_idx:end_idx]
+                elif n_new == n_split:
+                    split_x_tensor[:] = new_data
+                    if global_dataset is not None:
+                        global_dataset[start_idx:end_idx] = new_data
+                elif n_global is not None and n_new >= n_global:
+                    global_dataset[:] = new_data[:n_global]
+                    split_x_tensor[:] = global_dataset[start_idx:end_idx]
+                else:
+                    split_x_tensor[:] = new_data[:n_split]
+                    if global_dataset is not None and n_new >= (end_idx - start_idx):
+                        global_dataset[start_idx:end_idx] = new_data[:(end_idx - start_idx)]
+
                 split_x = TensorDataset(split_x_tensor)
-                # Re-initialize projection with new data
                 sampler.init_projection(split_x_tensor)
-                # Update visualization batch to show the new resampled data
                 viz_batch_original, _ = get_sample_for_visualization(split_x, preprocess_fn, H.num_images_visualize, H.dataset)
-                
+
                 if split_condition_data is not None:
-                    split_condition_data[:] = new_conditions
-                    # Also update the global condition_data (extract tensor from TensorDataset)
-                    if condition_data is not None:
-                        # Get the underlying tensor from TensorDataset
-                        condition_tensor = condition_data.tensors[0]
-                        start_idx = split_ind * subset_len
-                        end_idx = min(start_idx + subset_len, len(condition_tensor))
-                        condition_tensor[start_idx:end_idx] = new_conditions.cpu()
+                    try:
+                        cond_global = condition_data.tensors[0]
+                    except Exception:
+                        cond_global = None
+
+                    n_cond_new = new_conditions.shape[0]
+                    if cond_global is not None and n_cond_new == cond_global.shape[0]:
+                        cond_global[:] = new_conditions.cpu()
+                        split_condition_data[:] = cond_global[start_idx:end_idx].cuda()
+                    elif n_cond_new == n_split:
+                        split_condition_data[:] = new_conditions.cuda()
+                        if cond_global is not None:
+                            cond_global[start_idx:end_idx] = new_conditions.cpu()
+                    elif cond_global is not None and n_cond_new >= cond_global.shape[0]:
+                        cond_global[:] = new_conditions[:cond_global.shape[0]].cpu()
+                        split_condition_data[:] = cond_global[start_idx:end_idx].cuda()
+                    else:
+                        split_condition_data[:] = new_conditions[:n_split].cuda()
+
+                    if cond_global is not None:
                         print(f"Updated conditions: {new_conditions.shape}")
             
 
@@ -460,7 +606,6 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             cur_dists_l2 = torch.empty([subset_len], dtype=torch.float32).cuda()
 
             if condition_data != None:
-                print("first call is here!")
                 cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(split_x_tensor, imle, 
                                                                                                 dists=cur_dists,  
                                                                                                 dists_lpips=cur_dists_lpips,
@@ -514,13 +659,21 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 print("calculating fid")
                 print("Learning rate: ", optimizer.param_groups[0]['lr'])
                 if split_condition_data != None:
-                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor), condition_data=split_condition_data)
+                    generate_and_save(H, imle, sampler, min(1000,subset_len * H.fid_factor), condition_data=split_condition_data)
                 else:
-                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor))
+                    generate_and_save(H, imle, sampler, min(1000,subset_len * H.fid_factor))
 
                 real_dir = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
                 print(real_dir, f'{H.save_dir}/fid/')
-                cur_fid = fid.compute_fid(real_dir, f'{H.save_dir}/fid/', verbose=False)
+                try:
+                    cur_fid = fid.compute_fid(real_dir, f'{H.save_dir}/fid/', verbose=False)
+                except Exception as e:
+                    import traceback
+                    logprint(f"[WARN] FID computation failed with unexpected error: {e}")
+                    logprint(traceback.format_exc())
+                    logprint("Skipping FID evaluation for this iteration.")
+                    cur_fid = float('inf')
+
                 if cur_fid < best_fid:
                     best_fid = cur_fid
                     # save models
@@ -528,7 +681,8 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                     logprint(f'Saving model best fid {best_fid} @ {iterate} to {fp}')
                     save_model(fp, imle, ema_imle, optimizer, scheduler, H)
                 
-                precision, recall = compute_prec_recall(f'{H.data_root}/img', f'{H.save_dir}/fid/')
+                real_dir_prec_rec = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
+                precision, recall = compute_prec_recall(real_dir_prec_rec, f'{H.save_dir}/fid/')
 
                 metrics['fid'] = cur_fid
                 metrics['best_fid'] = best_fid
@@ -566,8 +720,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                         viz_batch_original.shape, imle, ema_imle,
                         f'{H.save_dir}/latest.png', logprint, experiment)                    
 
-            if H.use_wandb:
-                wandb.log(metrics, step=iterate)
+
             
             if experiment is not None:
                 experiment.log_metrics(metrics, epoch=epoch, step=iterate)
@@ -600,13 +753,6 @@ def main(H=None):
     else:
         experiment = None
 
-    if H.use_wandb:
-        wandb.init(
-            name=H.wandb_name,
-            project=H.wandb_project,
-            config=H,
-            mode=H.wandb_mode,
-        )
 
     os.makedirs(f'{H.save_dir}/fid', exist_ok=True)
     
@@ -814,8 +960,9 @@ def main(H=None):
 
         print("Generating images")
         generate_and_save(H, imle, sampler, 1000, subdir='prec_rec')
-        print(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
-        precision, recall = compute_prec_recall(f'{H.data_root}/img', f'{H.save_dir}/prec_rec/')
+        real_dir_final = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
+        print(real_dir_final, f'{H.save_dir}/prec_rec/')
+        precision, recall = compute_prec_recall(real_dir_final, f'{H.save_dir}/prec_rec/')
         print("Precision: ", precision)
         print("Recall: ", recall)
 

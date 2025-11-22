@@ -682,25 +682,6 @@ class UNetModel(nn.Module):
         # If return_latent_only is True, return the latent before VAE decode
         if return_latent_only:
             return latent
-        
-        # Compute statistics over latent
-        # Shape: (batch_size, channels, height, width)
-        latent_flat = latent.view(latent.shape[0], -1)  # Flatten to (batch_size, channels*height*width)
-        
-        # For each dimension i (each spatial position across channels):
-        # Mean: (image1[i] + image2[i] + ... + imageN[i]) / N
-        # Then average all these means
-        latent_mean_per_dim = latent_flat.mean(dim=0)  # Mean across batch for each dimension
-        latent_mean = latent_mean_per_dim.mean().item()  # Average of all per-dimension means
-        
-        # Variance: For each dimension i, compute variance across all images
-        # (image1[i] - mean[i])^2 + (image2[i] - mean[i])^2 + ... + (imageN[i] - mean[i])^2) / N
-        # Then average all these variances
-        latent_variance_per_dim = latent_flat.var(dim=0)  # Variance across batch for each dimension
-        latent_variance = latent_variance_per_dim.mean().item()  # Average of all per-dimension variances
-        
-        print(f"Latent Mean (averaged across dimensions): {latent_mean:.6f}")
-        print(f"Latent Variance (averaged across dimensions): {latent_variance:.6f}")
         decoded_images = self.vae.decode(latent /  self.vae.config.scaling_factor).sample
         return decoded_images
 
