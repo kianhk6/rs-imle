@@ -26,7 +26,7 @@ def get_sample_for_visualization(data, preprocess_fn, num, dataset):
 
 
 
-def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None, save_to_file=False):
+def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None, save_to_file=False, experiment=None):
     mb = shape[0]
     initial = initial[:mb].cuda()
     if condition_data is not None:
@@ -42,8 +42,13 @@ def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logp
     if save_to_file:
         logprint(f'printing samples to {fname}')
         imageio.imwrite(fname, im)
+        # if experiment:
+        #     experiment.log_image(fname, overwrite=False)
     else:
         logprint(f'generated samples (not saved to file, only for logging)')
+        # if experiment:
+        #     # Log numpy array directly to comet without saving to file
+        #     experiment.log_image(im, name=fname, overwrite=False)
     
     return im
 
@@ -127,21 +132,15 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
                 
-                # Handle condition data batching
-                # replace lines 96-111 in visual/utils.py with this
-                # Handle condition data batching (random sample)
+                # Generate random noise as conditions (not using actual condition_data)
                 batch_condition_data = None
                 if condition_data is not None:
-                    num_conditions = len(condition_data)
-                    rand_indices = torch.randint(0, num_conditions, (batch_size,), device='cpu').tolist()
-                    batch_conditions = []
-                    for idx in rand_indices:
-                        cond_sample = condition_data[idx]
-                        if isinstance(cond_sample, tuple):
-                            batch_conditions.append(cond_sample[0])
-                        else:
-                            batch_conditions.append(cond_sample)
-                    batch_condition_data = torch.stack(batch_conditions).cuda()
+                    # Get a sample to determine the condition shape
+                    sample_cond = condition_data[0]
+                    if isinstance(sample_cond, tuple):
+                        sample_cond = sample_cond[0]
+                    # Generate random noise with the same shape
+                    batch_condition_data = torch.randn(batch_size, *sample_cond.shape, device='cuda')
                 
                 samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
 

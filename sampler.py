@@ -17,7 +17,15 @@ from models import parse_layer_string
 
 class Sampler:
     def __init__(self, H, sz, preprocess_fn, condition_config=None, teacher_model=None, teacher_vae=None):
-        self.pool_size = ceil(int(H.force_factor * sz) / H.imle_db_size) * H.imle_db_size
+        # In regression mode (use_teacher_noise_as_input), we don't need IMLE sampling pool
+        # so pool_size = sz directly. Otherwise, round up to imle_db_size for batching.
+        self.use_teacher_noise_as_input = getattr(H, 'use_teacher_noise_as_input', False)
+        if self.use_teacher_noise_as_input:
+            self.pool_size = sz  # Regression mode: 1:1 mapping, no pool needed
+            print(f"✓ Regression mode: pool_size set to {sz} (no IMLE sampling pool)")
+        else:
+            self.pool_size = ceil(int(H.force_factor * sz) / H.imle_db_size) * H.imle_db_size
+        
         self.preprocess_fn = preprocess_fn
         self.l2_loss = torch.nn.MSELoss(reduce=False).cuda()
         self.H = H
@@ -185,8 +193,9 @@ class Sampler:
         self.pool_condition_indices = None
 
         self.condition_config = None
+
         if condition_config is not None:
-            self.configure_conditions(sz=sz, **condition_config)
+            self.configure_conditions(sz=sz, **condition_config, use_teacher_noise_as_input=self.use_teacher_noise_as_input)
 
     def configure_conditions(
         self,
@@ -194,7 +203,8 @@ class Sampler:
         force_factor=None,
         base_indices=None,
         device=None,
-        sz=None
+        sz=None,
+        use_teacher_noise_as_input = False,
     ):
         if condition_tensor is None:
             self.pool_condition_data = None
@@ -228,15 +238,24 @@ class Sampler:
 
         data_size = condition_tensor.shape[0]
         expected_pool = sample_factor * data_size
-        if expected_pool != self.pool_size:
-            raise ValueError(
-                f"Provided condition tensor of length {data_size} with force_factor {sample_factor} "
-                f"does not match pool_size {self.pool_size}"
-            )
+        
+        # In regression mode (use_teacher_noise_as_input), skip pool size validation
+        # since we don't use IMLE sampling and force_factor=1
+        if not use_teacher_noise_as_input:
+            if expected_pool != self.pool_size:
+                raise ValueError(
+                    f"Provided condition tensor of length {data_size} with force_factor {sample_factor} "
+                    f"does not match pool_size {self.pool_size}"
+                )
+        else:
+            # Regression mode: verify force_factor=1
+            if sample_factor != 1:
+                print(f"WARNING: use_teacher_noise_as_input=True but force_factor={sample_factor}")
+                print(f"         Regression mode should use force_factor=1 for direct mapping")
 
+        # For regression mode with force_factor=1, this just keeps the tensor as-is
+        # For IMLE mode with force_factor>1, this creates multiple candidates per sample
         interleaved_conditions = torch.repeat_interleave(condition_tensor, sample_factor, dim=0)
-        # print("sample_factor", sample_factor)
-        # print("shape", interleaved_conditions.shape)
         if not interleaved_conditions.is_contiguous():
             interleaved_conditions = interleaved_conditions.contiguous()
 

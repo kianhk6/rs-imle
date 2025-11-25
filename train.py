@@ -232,12 +232,28 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
         if (hasattr(H, 'teacher_generate_initial_data') and H.teacher_generate_initial_data and 
             teacher_model is not None and epoch == starting_epoch - 1):
             print(f"\n{'='*70}", flush=True)
-            print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch 0)", flush=True)
+            
+            # Determine the correct teacher seed based on whether we're restoring from checkpoint
+            restoring_from_checkpoint = (H.restore_path is not None and os.path.isfile(H.restore_path))
+            
+            if restoring_from_checkpoint and starting_epoch > 0:
+                # When restoring, calculate which epoch had the last teacher resample
+                # This ensures we regenerate the exact same dataset the model was trained on
+                teacher_force_resample = getattr(H, 'teacher_force_resample', 20)
+                last_teacher_epoch = (starting_epoch // teacher_force_resample) * teacher_force_resample
+                teacher_seed = H.seed + last_teacher_epoch if hasattr(H, 'seed') else None
+                print(f"RESTORING: Regenerating teacher dataset from last resample (Epoch {last_teacher_epoch})", flush=True)
+                print(f"  Starting epoch: {starting_epoch}, Teacher resample interval: {teacher_force_resample}", flush=True)
+                print(f"  Using teacher seed: {teacher_seed}", flush=True)
+            else:
+                # Fresh training: generate initial dataset at epoch -1 (before epoch 0)
+                teacher_seed = H.seed + epoch if hasattr(H, 'seed') else None
+                print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch {epoch})", flush=True)
+                print(f"  Using teacher seed: {teacher_seed}", flush=True)
+            
             print(f"{'='*70}", flush=True)
             
             # Generate new data and conditions from teacher with deterministic seed
-            # Use global seed + epoch for reproducibility
-            teacher_seed = H.seed + epoch if hasattr(H, 'seed') else None
             new_data, new_conditions = sampler.generate_new_data_from_teacher(
                 num_teacher_steps=getattr(H, 'teacher_resample_steps', 20),
                 seed=teacher_seed
@@ -388,7 +404,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                     with torch.no_grad():
                         snoise = [s[batch_slice] for s in sampler.selected_snoise]
                         generate_for_NN(sampler, x[0], latents, snoise, viz_batch_original.shape, imle,
-                            f'{H.save_dir}/NN-samples_{epoch}-{split_ind}-imle.png', logprint)
+                            f'{H.save_dir}/NN-samples_{epoch}-{split_ind}-imle.png', logprint, experiment=experiment)
                     print('loaded latest latents')
 
                 if os.path.isfile(str(H.restore_latent_path)):
@@ -492,12 +508,13 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                             f'{H.save_dir}/NN-samples_{epoch}-imle.png',
                             logprint,
                             condition_data=cond_vis,
+                            experiment=experiment,
                         )
                 else:
                         generate_for_NN(sampler, split_x_tensor[to_update[:H.num_images_visualize]], latents,
                             [s[to_update[:H.num_images_visualize]] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle,
-                            f'{H.save_dir}/NN-samples_{epoch}-imle.png', logprint)
+                            f'{H.save_dir}/NN-samples_{epoch}-imle.png', logprint, experiment=experiment)
 
             comb_dataset = ZippedDataset(split_x, TensorDataset(sampler.selected_latents))
             data_loader = DataLoader(comb_dataset, batch_size=H.n_batch, pin_memory=True, shuffle=False, num_workers=0, persistent_workers=False)
@@ -565,7 +582,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                 sampler.selected_latents[0: H.num_images_visualize],
                                 [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                                 viz_batch_original.shape, imle, ema_imle,
-                                f'{H.save_dir}/samples-{iterate}.png', logprint, experiment,
+                                f'{iterate}.png', logprint, experiment,
                                 condition_data=cond_vis2,
                             )
                         else:
@@ -573,7 +590,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                             sampler.selected_latents[0: H.num_images_visualize],
                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle, ema_imle,
-                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment)
+                            f'{iterate}.png', logprint, experiment)
 
                 iterate += 1
                 if iterate % H.iters_per_save == 0:
