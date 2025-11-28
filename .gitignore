@@ -18,3 +18,9 @@ train_log.txt
 default/
 
 datasets.zip
+**/__pycache__/
+teacher/
+__pycache__/
+# Python cache
+__pycache__/
+*.pyc

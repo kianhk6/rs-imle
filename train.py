@@ -241,13 +241,13 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 # This ensures we regenerate the exact same dataset the model was trained on
                 teacher_force_resample = getattr(H, 'teacher_force_resample', 20)
                 last_teacher_epoch = (starting_epoch // teacher_force_resample) * teacher_force_resample
-                teacher_seed = H.seed + last_teacher_epoch if hasattr(H, 'seed') else None
+                teacher_seed = -1
                 print(f"RESTORING: Regenerating teacher dataset from last resample (Epoch {last_teacher_epoch})", flush=True)
                 print(f"  Starting epoch: {starting_epoch}, Teacher resample interval: {teacher_force_resample}", flush=True)
                 print(f"  Using teacher seed: {teacher_seed}", flush=True)
             else:
                 # Fresh training: generate initial dataset at epoch -1 (before epoch 0)
-                teacher_seed = H.seed + epoch if hasattr(H, 'seed') else None
+                teacher_seed = -1
                 print(f"GENERATING INITIAL DATASET FROM TEACHER (Epoch {epoch})", flush=True)
                 print(f"  Using teacher seed: {teacher_seed}", flush=True)
             
@@ -488,8 +488,8 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             last_updated[to_update] = 0
             times_updated[to_update] = times_updated[to_update] + 1
 
-            save_latents_latest(H, split_ind, sampler.selected_latents)
-            save_latents_latest(H, split_ind, change_thresholds, name='threshold_latest')
+            # save_latents_latest(H, split_ind, sampler.selected_latents)
+            # save_latents_latest(H, split_ind, change_thresholds, name='threshold_latest')
 
             if to_update.shape[0] >= H.num_images_visualize + 8:
                 vis_idx = to_update[:H.num_images_visualize]

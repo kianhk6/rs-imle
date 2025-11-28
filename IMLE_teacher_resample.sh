@@ -160,77 +160,6 @@ CUDA_VISIBLE_DEVICES=0 python /home/kha98/Desktop/rs-imle/train.py \
 
 
 
-
-
-nohup bash -c '
-CUDA_VISIBLE_DEVICES=1 python /home/kha98/Desktop/rs-imle/train.py \
-    --hps fewshot \
-    --save_dir /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/ \
-    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
-    --model_type unet \
-    --force_factor 20 \
-    --imle_force_resample 10 \
-    --use_comet True \
-    --latent_dim 4096 \
-    --comet_name resample-scheduled-lr-2-resample-20-10-5 \
-    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
-    --use_teacher_resample True \
-    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
-    --teacher_resample_steps 20 \
-    --teacher_num_samples 4000 \
-    --imle_db_size 2000 \
-    --imle_batch 50 \
-    --use_teacher_resample_schedule True \
-    --every_n_epochs_resample_data "20,10,5" \
-    --change_schedule_of_data_resampling_every_n_epoch "60,120" \
-    --subset_len -1 \
-    --lr 0.0002 \
-    --n_batch 12 \
-    --teacher_generate_initial_data True \
-    --fid_freq 30 \
-    --restore_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train/latest-model.th \
-    --restore_ema_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train/latest-model-ema.th \
-    --restore_log_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train/log.jsonl \
-    --restore_optimizer_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train/latest-opt.th \
-    --restore_scheduler_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train/latest-sched.th \
-    --comet_experiment_key '677aa445f7e2460b9259199b66024dd1'
-' > /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20-10-5/train-1.log 2>&1 &
-
-
-nohup bash -c '
-CUDA_VISIBLE_DEVICES=3 python /home/kha98/Desktop/rs-imle/train.py \
-    --hps fewshot \
-    --save_dir /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/ \
-    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
-    --model_type unet \
-    --force_factor 20 \
-    --imle_force_resample 10 \
-    --use_comet True \
-    --latent_dim 4096 \
-    --comet_name resample-scheduled-lr-2-resample-20 \
-    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
-    --use_teacher_resample True \
-    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
-    --teacher_resample_steps 20 \
-    --teacher_num_samples 4000 \
-    --imle_db_size 2000 \
-    --imle_batch 50 \
-    --teacher_force_resample 20 \
-    --subset_len -1 \
-    --lr 0.0002 \
-    --n_batch 12 \
-    --teacher_generate_initial_data True \
-    --fid_freq 30 \
-    --restore_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train/latest-model.th \
-    --restore_ema_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train/latest-model-ema.th \
-    --restore_log_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train/log.jsonl \
-    --restore_optimizer_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train/latest-opt.th \
-    --restore_scheduler_path /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train/latest-sched.th \
-    --comet_experiment_key 'a4976dfb96034c3b9d0c55f6f6db3fbb'
-' > /localscratch/kian/resample_teacher/resample-scheduled-lr-2-resample-20/train-1.log 2>&1 &
-
-
-
 nohup bash -c '
 CUDA_VISIBLE_DEVICES=6 python /home/kha98/Desktop/rs-imle/train.py \
     --hps fewshot \
@@ -256,6 +185,7 @@ CUDA_VISIBLE_DEVICES=6 python /home/kha98/Desktop/rs-imle/train.py \
     --teacher_generate_initial_data True \
     --use_teacher_noise_as_input True \
     --fid_freq 30 \
+    --iters_per_save 5000 \
     --restore_path /localscratch/kian/resample_teacher/regression-noise-as-input-4000/train/latest-model.th \
     --restore_ema_path /localscratch/kian/resample_teacher/regression-noise-as-input-4000/train/latest-model-ema.th \
     --restore_log_path /localscratch/kian/resample_teacher/regression-noise-as-input-4000/train/log.jsonl \
@@ -274,6 +204,108 @@ CUDA_VISIBLE_DEVICES=6 python /home/kha98/Desktop/rs-imle/train.py \
 # Latent codes are ignored in this mode.
 #
 
+
+nohup bash -c '
+CUDA_VISIBLE_DEVICES=8 python /home/kha98/Desktop/rs-imle/train.py \
+    --hps fewshot \
+    --save_dir  /localscratch/kian/resample_teacher/regression-noise-as-input-25000/ \
+    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
+    --model_type unet \
+    --force_factor 1 \
+    --imle_force_resample 1 \
+    --use_comet True \
+    --latent_dim 4096 \
+    --comet_name regression-noise-as-input-25000 \
+    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
+    --use_teacher_resample True \
+    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
+    --teacher_resample_steps 20 \
+    --teacher_num_samples 25000 \
+    --imle_db_size 2000 \
+    --imle_batch 50 \
+    --teacher_force_resample 20000000000000000000 \
+    --subset_len -1 \
+    --lr 0.0002 \
+    --n_batch 12 \
+    --teacher_generate_initial_data True \
+    --use_teacher_noise_as_input True \
+    --fid_freq 10 \
+    --iters_per_save 5000 \
+    --restore_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/best_fid-model.th \
+    --restore_ema_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/best_fid-model-ema.th \
+    --restore_log_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/best_fid-log.jsonl \
+    --restore_optimizer_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/best_fid-opt.th \
+    --restore_scheduler_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/best_fid-sched.th \
+' > /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train-1.log 2>&1 &
+
+
+nohup bash -c '
+CUDA_VISIBLE_DEVICES=0 python /home/kha98/Desktop/rs-imle/train.py \
+    --hps fewshot \
+    --save_dir  /localscratch/kian/resample_teacher/regression-noise-as-input-25000/ \
+    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
+    --model_type unet \
+    --force_factor 1 \
+    --imle_force_resample 1 \
+    --use_comet True \
+    --latent_dim 4096 \
+    --comet_name regression-noise-as-input-25000 \
+    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
+    --use_teacher_resample True \
+    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
+    --teacher_resample_steps 20 \
+    --teacher_num_samples 25000 \
+    --imle_db_size 2000 \
+    --imle_batch 50 \
+    --teacher_force_resample 20000000000000000000 \
+    --subset_len -1 \
+    --lr 0.0002 \
+    --n_batch 12 \
+    --teacher_generate_initial_data True \
+    --use_teacher_noise_as_input True \
+    --fid_freq 10 \
+    --iters_per_save 5000 \
+    --comet_experiment_key c4c8e8a37d0d4509b8eb9c274dcf33f6 \
+    --restore_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/latest-model.th \
+    --restore_ema_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/latest-model-ema.th \
+    --restore_log_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/log.jsonl \
+    --restore_optimizer_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/latest-opt.th \
+    --restore_scheduler_path /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train/latest-sched.th \
+' > /localscratch/kian/resample_teacher/regression-noise-as-input-25000/train-2.log 2>&1 &
+
+
+nohup bash -c '
+CUDA_VISIBLE_DEVICES=1 python /home/kha98/Desktop/rs-imle/train.py \
+    --hps fewshot \
+    --save_dir  /localscratch/kian/resample_teacher/regression-noise-as-input-50000/ \
+    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
+    --model_type unet \
+    --force_factor 1 \
+    --imle_force_resample 1 \
+    --use_comet True \
+    --latent_dim 4096 \
+    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
+    --use_teacher_resample True \
+    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
+    --teacher_resample_steps 20 \
+    --teacher_num_samples 50000 \
+    --imle_db_size 2000 \
+    --imle_batch 50 \
+    --teacher_force_resample 20000000000000000000 \
+    --subset_len -1 \
+    --lr 0.0002 \
+    --n_batch 12 \
+    --teacher_generate_initial_data True \
+    --use_teacher_noise_as_input True \
+    --fid_freq 10 \
+    --iters_per_save 5000 \
+    --comet_experiment_key cd62018c663543c9a94c6515b72d3b69 \
+    --restore_path /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train/latest-model.th \
+    --restore_ema_path /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train/latest-model-ema.th \
+    --restore_log_path /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train/log.jsonl \
+    --restore_optimizer_path /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train/latest-opt.th \
+    --restore_scheduler_path /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train/latest-sched.th \
+' > /localscratch/kian/resample_teacher/regression-noise-as-input-50000/train-1.log 2>&1 &
 
 
 

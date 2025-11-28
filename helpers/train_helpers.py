@@ -281,10 +281,10 @@ def load_opt(H, imle, logprint):
 
     if H.restore_optimizer_path:
         optimizer.load_state_dict(
-            torch.load(distributed_maybe_download(H.restore_optimizer_path, H.local_rank, H.mpi_size), map_location='cpu'))
+            torch.load(distributed_maybe_download(H.restore_optimizer_path, H.local_rank, H.mpi_size), map_location='cpu', weights_only=False))
     if H.restore_scheduler_path:
         scheduler.load_state_dict(
-            torch.load(distributed_maybe_download(H.restore_scheduler_path, H.local_rank, H.mpi_size), map_location='cpu'))
+            torch.load(distributed_maybe_download(H.restore_scheduler_path, H.local_rank, H.mpi_size), map_location='cpu', weights_only=False))
     if H.restore_log_path:
         cur_eval_loss, iterate, starting_epoch = restore_log(H.restore_log_path, H.local_rank, H.mpi_size)
     else:

@@ -165,6 +165,7 @@ def add_imle_arguments(parser):
     parser.add_argument('--every_n_epochs_resample_data', type=str, default=None)  # Comma-separated list: how often to resample in each phase (e.g., "800,200,100,50") - length must be N+1
     parser.add_argument('--change_schedule_of_data_resampling_every_n_epoch', type=str, default=None)  # Comma-separated list: epoch boundaries between phases (e.g., "800,2000,6000") - length must be N
     parser.add_argument('--teacher_generate_initial_data', default=False, type=lambda x: bool(strtobool(x)))  # Generate initial dataset from teacher at epoch 0 (instead of loading from disk)
+    parser.add_argument('--use_teacher_noise_as_input', default=False, type=lambda x: bool(strtobool(x)))  # Regression mode: use teacher noise as input
 
 
     parser.add_argument('--latent_lr', type=float, default=0.0001)  # learning rate for optimizing latent codes -- not used

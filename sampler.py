@@ -795,7 +795,7 @@ class Sampler:
                 print("hello2")
 
                 # Use global seed + epoch for deterministic teacher resampling
-                teacher_seed = self.H.seed + epoch if hasattr(self.H, 'seed') else None
+                teacher_seed = -1
                 new_data, new_conditions = self.generate_new_data_from_teacher(
                     num_teacher_steps=getattr(self.H, 'teacher_resample_steps', 20),
                     seed=teacher_seed
@@ -847,8 +847,38 @@ class Sampler:
         if condition_data is not None:
             print(f'Starting rejection sampling for {to_update.shape[0]} samples...', flush=True)
             total_rejected = 0
+            
+            # Optimization for force_factor=1 (common in teacher noise mode)
+            # This avoids the slow Python loop over the dataset
+            ff = int(self.H.force_factor)
+            loop_range = range(to_update.shape[0])
+            
+            if ff == 1:
+                print(f"Using vectorized fast path for force_factor=1...", flush=True)
+                with torch.no_grad():
+                    # Direct mapping: pool index = sample index
+                    # to_update contains the indices we need to update
+                    
+                    # Update latents with perturbation
+                    # pool_latents and selected_latents_tmp are typically on CPU
+                    perturbation = self.H.imle_perturb_coef * torch.randn(
+                        (len(to_update), self.H.latent_dim),
+                        dtype=self.selected_latents_tmp.dtype,
+                        device=self.selected_latents_tmp.device
+                    )
+                    
+                    self.selected_latents_tmp[to_update] = self.pool_latents[to_update] + perturbation
+                    
+                    # Update snoise
+                    if self.H.use_snoise:
+                        for r in range(len(self.res)):
+                            self.selected_snoise[r][to_update] = self.snoise_pool[r][to_update]
+                            
+                # Skip the slow loop
+                loop_range = range(0)
+
             with torch.no_grad():
-                for i in range(to_update.shape[0]):
+                for i in loop_range:
                     if i > 0 and i % 1000 == 0:
                         print(f'  Processed {i}/{to_update.shape[0]} samples...', flush=True)
                     idx = to_update[i]
