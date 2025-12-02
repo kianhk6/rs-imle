@@ -428,7 +428,8 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         use_learnable_timestep=False,
-        use_conditioning=True
+        use_conditioning=True,
+        variance_booster=1
     ):
         super().__init__()
 
@@ -451,6 +452,7 @@ class UNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.use_learnable_timestep = use_learnable_timestep
         self.use_conditioning = use_conditioning
+        self.variance_booster = variance_booster
 
         if not use_conditioning and not use_learnable_timestep:
             # No conditioning and no learnable timestep - skip embedding layers
@@ -611,9 +613,9 @@ class UNetModel(nn.Module):
         
         # Xavier initialization with standard gain for high variance
         # Zero bias to keep mean close to 0
-        nn.init.xavier_uniform_(self.out[-1].weight, gain=0.01)
-        if self.out[-1].bias is not None:
-            nn.init.zeros_(self.out[-1].bias)
+        # nn.init.xavier_uniform_(self.out[-1].weight, gain=0.01)
+        # if self.out[-1].bias is not None:
+        #     nn.init.zeros_(self.out[-1].bias)
         
         self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to('cuda')
         for param in self.vae.parameters():
@@ -639,25 +641,44 @@ class UNetModel(nn.Module):
         :return: an [N x C x ...] Tensor of outputs.
         """
 
-        if self.use_learnable_timestep and self.learnable_timestep is not None:
+        # Determine embedding based on conditioning configuration
+        if not self.use_conditioning and not self.use_learnable_timestep:
+            # No conditioning - skip embedding entirely
+            emb = None
+        elif self.use_learnable_timestep:
             # Use the learnable timestep parameter and replicate for batch size
             timesteps = self.learnable_timestep.expand(x.shape[0])
-            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))      
-            emb = emb + condition
+            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+            if condition is not None:
+                emb = emb + condition
         else:
             emb = condition
 
         hs = []
         h = x.type(self.dtype)
-        for module in self.input_blocks:
-            h = module(h, emb)
-            hs.append(h)
-        h = self.middle_block(h, emb)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
+        
+        # Forward pass - only pass emb if not None (i.e., if using conditioning)
+        if emb is not None:
+            for module in self.input_blocks:
+                h = module(h, emb)
+                hs.append(h)
+            h = self.middle_block(h, emb)
+            for module in self.output_blocks:
+                h = th.cat([h, hs.pop()], dim=1)
+                h = module(h, emb)
+        else:
+            # No embedding - simplified forward pass
+            for module in self.input_blocks:
+                # Modules will handle None emb internally
+                h = module(h, None)
+                hs.append(h)
+            h = self.middle_block(h, None)
+            for module in self.output_blocks:
+                h = th.cat([h, hs.pop()], dim=1)
+                h = module(h, None)
 
         latent = self.out(h.to(x.dtype))
+        latent = latent 
         decoded_images = self.vae.decode(latent /  self.vae.config.scaling_factor).sample
         return decoded_images
 
@@ -904,6 +925,7 @@ class UNetModelWrapper(UNetModel):
         use_new_attention_order=False,
         use_learnable_timestep=False,
         use_conditioning=True,
+        variance_booster=1,
         **kwargs,  # Absorb any additional arguments
     ):
         self.use_learnable_timestep = use_learnable_timestep
@@ -951,7 +973,8 @@ class UNetModelWrapper(UNetModel):
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
             use_learnable_timestep=use_learnable_timestep,
-            use_conditioning=use_conditioning
+            use_conditioning=use_conditioning,
+            variance_booster=variance_booster
         )
 
     def forward(self, x, condition=None, *args, **kwargs):

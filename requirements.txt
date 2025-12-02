@@ -1,4 +1,4 @@
-scipy==1.11.1
+scipy==1.11.2
 clean_fid==0.1.35
 comet_ml
 imageio==2.9.0
@@ -9,3 +9,12 @@ scikit_learn
 torchvision
 tqdm==4.64.0
 wandb
+diffusers
+transformers
+accelerate
+huggingface_hub
+safetensors
+tokenizers
+timm
+Pillow
+lpips

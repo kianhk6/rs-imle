@@ -290,13 +290,14 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                 viz_batch_original.shape, imle, ema_imle,
                                 f'{H.save_dir}/samples-{iterate}.png', logprint, experiment,
                                 condition_data=cond_vis2,
+                                epoch=epoch,
                             )
                         else:
                             generate_images_initial(H, sampler, viz_batch_original,
                             sampler.selected_latents[0: H.num_images_visualize],
                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle, ema_imle,
-                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment)
+                            f'{H.save_dir}/samples-{iterate}.png', logprint, experiment, epoch=epoch)
 
                 iterate += 1
                 if iterate % H.iters_per_save == 0:
@@ -336,25 +337,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                                                                 dists_lpips=cur_dists_lpips,
                                                                                 dists_l2=cur_dists_l2, 
                                                                                 logging=True)
-            # # Compute metrics with the generator in eval mode to avoid dropout noise
-            # was_training = imle.training
-            # imle.eval()
-            # try:
-            #     cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(
-            #         split_x_tensor,
-            #         imle,
-            #         dists=cur_dists,
-            #         dists_lpips=cur_dists_lpips,
-            #         dists_l2=cur_dists_l2,
-            #         logging=True,
-            #         conditions=split_condition_data,
-            #         expect_condition_indices=False,
-            #     )
-            # finally:
-            #     if was_training:
-            #         imle.train()
-            # torch.save(cur_dists, f'{H.save_dir}/latent/dists-{epoch}.npy')
-                    
+                                                                                
             metrics = {
                 'mean_loss': torch.mean(cur_dists).item(),
                 'std_loss': torch.std(cur_dists).item(),
@@ -376,9 +359,9 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                 print("calculating fid")
                 print("Learning rate: ", optimizer.param_groups[0]['lr'])
                 if split_condition_data != None:
-                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor), condition_data=split_condition_data)
+                    generate_and_save(H, imle, sampler, min(1000,subset_len * H.fid_factor), condition_data=split_condition_data)
                 else:
-                    generate_and_save(H, imle, sampler, min(5000,subset_len * H.fid_factor))
+                    generate_and_save(H, imle, sampler, min(1000,subset_len * H.fid_factor))
 
                 real_dir = H.fid_real_dir if (hasattr(H, 'fid_real_dir') and H.fid_real_dir) else f'{H.data_root}/img'
                 print(real_dir, f'{H.save_dir}/fid/')
@@ -418,7 +401,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle, ema_imle,
                             f'{H.save_dir}/latest.png', logprint, experiment,
-                            condition_data=cond_vis2,
+                            condition_data=cond_vis2, epoch=epoch,
                         )
 
                     else:
@@ -426,7 +409,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                         sampler.selected_latents[0: H.num_images_visualize],
                         [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                         viz_batch_original.shape, imle, ema_imle,
-                        f'{H.save_dir}/latest.png', logprint, experiment)                    
+                        f'{H.save_dir}/latest.png', logprint, experiment, epoch=epoch)                    
 
             if H.use_wandb:
                 wandb.log(metrics, step=iterate)

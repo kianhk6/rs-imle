@@ -48,9 +48,10 @@ def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logp
     return im
 
 
-def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None, save_to_file=False):
+def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None, save_to_file=False, epoch=None):
     mb = shape[0]
     initial = initial[:mb]
+    image_name = str(epoch) if epoch is not None else os.path.basename(fname)
     if condition_data is not None:
         batches = [orig[:mb]]
         # Row 1: with matching condition slice if provided
@@ -63,16 +64,10 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
                 tmp_snoise = [s[:mb].normal_() for s in sampler.snoise_tmp]
             else:
                 tmp_snoise = [s[:mb] for s in sampler.neutral_snoise]
-            # Subsequent rows: step through next condition windows of size mb
-            start = (t + 1) * mb
-            end = start + mb
-            if condition_data.shape[0] >= end:
-                cur_cond = condition_data[start:end]
-            else:
-                idx = torch.arange(start, end) % max(1, condition_data.shape[0])
-                cur_cond = condition_data[idx]
+            # Subsequent rows: use random noise as condition instead of actual condition_data
+            random_cond = torch.randn_like(condition_data[:mb])
 
-            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=cur_cond))
+            batches.append(sampler.sample(temp_latent_rnds, imle, tmp_snoise, condition_data=random_cond))
             
         n_rows = len(batches)
         im = np.concatenate(batches, axis=0).reshape((n_rows, mb, *shape[1:])).transpose([0, 2, 1, 3, 4]).reshape(
@@ -82,12 +77,12 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, overwrite=True)
+                experiment.log_image(fname, name=image_name, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
                 # Log numpy array directly to comet without saving to file
-                experiment.log_image(im, name=fname, overwrite=True)
+                experiment.log_image(im, name=image_name, overwrite=False)
     else:
         batches = [orig[:mb], sampler.sample(initial, imle, snoise)]
         temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
@@ -105,7 +100,7 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, overwrite=True)
+                experiment.log_image(fname, name=image_name, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
@@ -125,25 +120,26 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
             for i in range(0, (n_samp // H.imle_batch)+1):
                 
                 batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
+                # Skip if there is no work left (avoids empty stacks when n_samp is divisible by batch size)
+                if batch_size == 0:
+                    break
                 
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
                 
                 # Handle condition data batching
-                # replace lines 96-111 in visual/utils.py with this
-                # Handle condition data batching (random sample)
+                # For FID: sample conditions from Gaussian prior (like in generate_images_initial line 68)
                 batch_condition_data = None
                 if condition_data is not None:
-                    num_conditions = len(condition_data)
-                    rand_indices = torch.randint(0, num_conditions, (batch_size,), device='cpu').tolist()
-                    batch_conditions = []
-                    for idx in rand_indices:
-                        cond_sample = condition_data[idx]
-                        if isinstance(cond_sample, tuple):
-                            batch_conditions.append(cond_sample[0])
-                        else:
-                            batch_conditions.append(cond_sample)
-                    batch_condition_data = torch.stack(batch_conditions).cuda()
+                    # Sample random conditions from Gaussian prior matching the condition data shape
+                    # Use first condition as template to get the shape
+                    first_cond = condition_data[0]
+                    if isinstance(first_cond, tuple):
+                        cond_shape = first_cond[0].shape
+                    else:
+                        cond_shape = first_cond.shape
+                    # Sample from Gaussian prior (same approach as generate_images_initial)
+                    batch_condition_data = torch.randn([batch_size, *cond_shape], dtype=torch.float32).cuda()
                 
                 samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
 

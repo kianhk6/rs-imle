@@ -166,6 +166,7 @@ class IMLE(nn.Module):
                 attention_resolutions="16",
                 dropout=0.1,
                 use_conditioning=use_conditioning,
+                variance_booster=H.variance_booster,
             )
             print(f"Using UNet model (conditional: {use_conditioning})")
         else:
