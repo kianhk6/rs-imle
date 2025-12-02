@@ -62,6 +62,8 @@ def accumulate_stats(stats, frequency):
 
 def linear_warmup(warmup_iters):
     def f(iteration):
+        if warmup_iters <= 0:
+            return 1.0  # No warmup, return full LR immediately
         return 1.0 if iteration > warmup_iters else iteration / warmup_iters
     return f
 

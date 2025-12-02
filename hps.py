@@ -166,6 +166,10 @@ def add_imle_arguments(parser):
     parser.add_argument('--change_schedule_of_data_resampling_every_n_epoch', type=str, default=None)  # Comma-separated list: epoch boundaries between phases (e.g., "800,2000,6000") - length must be N
     parser.add_argument('--teacher_generate_initial_data', default=False, type=lambda x: bool(strtobool(x)))  # Generate initial dataset from teacher at epoch 0 (instead of loading from disk)
     parser.add_argument('--use_teacher_noise_as_input', default=False, type=lambda x: bool(strtobool(x)))  # Regression mode: use teacher noise as input
+    parser.add_argument('--resample_every_batch', default=False, type=lambda x: bool(strtobool(x)))  # Simple mode: generate fresh noise every batch, teacher generates samples, student learns from same noise (no dataset/epochs)
+    parser.add_argument('--num_iters', type=int, default=None)  # Number of iterations for resample_every_batch mode (defaults to num_epochs * iters_per_epoch if not set)
+    parser.add_argument('--virtual_dataset_size', type=int, default=100)  # Virtual dataset size for epoch simulation in resample_every_batch mode (iters_per_epoch = virtual_dataset_size / n_batch)
+    parser.add_argument('--fid_freq_iters', type=int, default=1000)  # FID calculation frequency in iterations for resample_every_batch mode
 
 
     parser.add_argument('--latent_lr', type=float, default=0.0001)  # learning rate for optimizing latent codes -- not used

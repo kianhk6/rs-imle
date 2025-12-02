@@ -3,6 +3,7 @@ import time
 
 from comet_ml import Experiment, ExistingExperiment
 import imageio
+import numpy as np
 import torch
 import torch.nn as nn
 from cleanfid import fid
@@ -26,11 +27,156 @@ from visual.nn_interplate import nn_interp
 from visual.spatial_visual import spatial_vissual
 from visual.utils import (generate_and_save, generate_for_NN,
                           generate_images_initial,
-                          get_sample_for_visualization)
+                          get_sample_for_visualization,
+                          delete_content_of_dir)
 from helpers.improved_precision_recall import compute_prec_recall
 from diffusers.models import AutoencoderKL
 
 # To Do: this one is for the selected latents 
+def generate_visualization_grid(batch_noise, teacher_images, teacher_model, teacher_vae, imle, H, latent_size, iteration, experiment=None, save_dir=None, rows=10, cols=10):
+    """
+    Generate a visualization grid comparing teacher and student outputs.
+    
+    Grid layout:
+    - Row 0: teacher outputs on current batch noise (plus extra random noise if needed)
+    - Row 1: student outputs on the SAME noises as row 0
+    - Rows 2-9: student outputs on random noise only (teacher not used)
+    
+    Args:
+        batch_noise: Current training batch noise [B, 4, H//8, W//8]
+        teacher_images: Teacher outputs for batch_noise [B, H, W, 3] uint8
+        teacher_model: Teacher model
+        teacher_vae: Teacher VAE
+        imle: Student model
+        H: Hyperparameters
+        latent_size: Latent size (H.image_size // 8)
+        iteration: Current iteration number
+        experiment: Comet experiment object (optional)
+        save_dir: Directory to save image (optional)
+        rows: Number of rows in grid (default 10)
+        cols: Number of columns in grid (default 10)
+    
+    Returns:
+        grid_image: numpy array of the visualization grid
+    """
+    import numpy as np
+    import imageio
+    import copy
+    from torchdyn.core import NeuralODE
+    
+    # How many columns use the current training batch noise
+    num_main = min(cols, batch_noise.shape[0])
+    
+    # 1) Current batch noise → teacher (already computed as teacher_images)
+    teacher_main = teacher_images[:num_main]  # [num_main, H, W, 3] uint8
+    
+    # 2) Current batch noise → student
+    #    Student takes noise as latents, unconditional (no conditions, no snoise)
+    #    Model outputs in [-1, 1] range, convert to [0, 255]
+    noise_main = batch_noise[:num_main]  # [num_main, 4, H//8, W//8]
+    px_z_main = imle(noise_main, None).permute(0, 2, 3, 1)  # [B, H, W, C]
+    xhat_main = (px_z_main + 1.0) * 127.5
+    xhat_main = xhat_main.detach().cpu().numpy()
+    student_main = np.minimum(np.maximum(0.0, xhat_main), 255.0).astype(np.uint8)
+    
+    teacher_row_images = teacher_main
+    student_row_images = student_main
+    
+    # 3) If we want more columns in the first two rows, use fresh random noise
+    # so that teacher and student see the same extra noises.
+    if cols > num_main:
+        rand_n = cols - num_main
+        rand_noise = torch.randn(
+            rand_n, 4, latent_size, latent_size, device="cuda"
+        )
+        
+        # Teacher: rand_noise → images
+        teacher_copy_viz = copy.deepcopy(teacher_model)
+        node_viz = NeuralODE(
+            teacher_copy_viz, solver="euler", sensitivity="adjoint"
+        )
+        traj_viz = node_viz.trajectory(
+            rand_noise,
+            t_span=torch.linspace(
+                0,
+                1,
+                getattr(H, "teacher_resample_steps", 20),
+                device="cuda",
+            ),
+        )
+        teacher_latents_viz = traj_viz[-1, :].view(rand_noise.shape)
+        teacher_images_viz = teacher_vae.decode(
+            teacher_latents_viz / teacher_vae.config.scaling_factor
+        ).sample
+        teacher_images_viz = (teacher_images_viz + 1) / 2
+        teacher_images_viz = (
+            torch.clamp(teacher_images_viz, 0, 1) * 255
+        )
+        teacher_images_viz = (
+            teacher_images_viz.byte()
+            .permute(0, 2, 3, 1)
+            .cpu()
+        )
+        
+        # Student: rand_noise → images (same unconditional mapping as training)
+        px_z_rand = imle(rand_noise, None).permute(0, 2, 3, 1)  # [B, H, W, C]
+        xhat_rand = (px_z_rand + 1.0) * 127.5
+        xhat_rand = xhat_rand.detach().cpu().numpy()
+        student_images_rand = np.minimum(np.maximum(0.0, xhat_rand), 255.0).astype(np.uint8)
+        
+        teacher_row_images = torch.cat(
+            [teacher_row_images, teacher_images_viz], dim=0
+        )
+        student_row_images = np.concatenate(
+            [student_row_images, student_images_rand], axis=0
+        )
+    
+    # Ensure exactly `cols` images in the first two rows
+    teacher_row_images = teacher_row_images[:cols]
+    student_row_images = student_row_images[:cols]
+    
+    teacher_np = teacher_row_images.numpy()
+    student_np = student_row_images
+    
+    # Build grid rows
+    rows_np = []
+    
+    # Row 0: teacher
+    row0 = np.concatenate([teacher_np[i] for i in range(cols)], axis=1)
+    rows_np.append(row0)
+    
+    # Row 1: student on same noises
+    row1 = np.concatenate([student_np[i] for i in range(cols)], axis=1)
+    rows_np.append(row1)
+    
+    # Rows 2–9: random noise input to the STUDENT only (no teacher)
+    for _ in range(2, rows):
+        rand_noise_row = torch.randn(
+            cols, 4, latent_size, latent_size, device="cuda"
+        )
+        px_z_row = imle(rand_noise_row, None).permute(0, 2, 3, 1)  # [B, H, W, C]
+        xhat_row = (px_z_row + 1.0) * 127.5
+        xhat_row = xhat_row.detach().cpu().numpy()
+        student_row_np = np.minimum(np.maximum(0.0, xhat_row), 255.0).astype(np.uint8)
+        row = np.concatenate(
+            [student_row_np[i] for i in range(cols)], axis=1
+        )
+        rows_np.append(row)
+    
+    # Stack all rows vertically → rows x cols grid
+    grid_image = np.concatenate(rows_np, axis=0)
+    
+    # # Save image if save_dir is provided
+    # if save_dir is not None:
+    #     imageio.imwrite(f"{save_dir}/samples_{iteration}.png", grid_image)
+    
+    # Log to experiment if provided
+    if experiment is not None:
+        experiment.log_image(grid_image, name=f"samples_{iteration}")
+    
+    return grid_image
+
+
 def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer, loss_fn, condition_data=None, batch_conditions=None, batch_condition_indices=None):
     t0 = time.time()
     imle.zero_grad()
@@ -742,11 +888,354 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             if experiment is not None:
                 experiment.log_metrics(metrics, epoch=epoch, step=iterate)
 
+def train_loop_resample_every_batch(H, imle, ema_imle, logprint, experiment=None):
+    """
+    Simplified training loop for resample_every_batch mode.
+    Every batch: generate n_batch noise → teacher generates n_batch samples → student learns from same noise.
+    No dataset persistence, no epoch-based resampling, no conditions.
+    """
+    print("="*70)
+    print("RESAMPLE_EVERY_BATCH MODE: Simplified training pipeline")
+    print("="*70)
+    print("Every batch:")
+    print("  1. Generate n_batch noise")
+    print("  2. Teacher generates n_batch samples from noise")
+    print("  3. Student uses same noise to predict")
+    print("  4. Calculate loss and update")
+    print("="*70)
+    
+    # Automatically enable use_teacher_noise_as_input for this mode
+    # This ensures the model is configured to accept noise as input
+    if not hasattr(H, 'use_teacher_noise_as_input') or not H.use_teacher_noise_as_input:
+        print("WARNING: resample_every_batch mode works best with use_teacher_noise_as_input=True")
+        print("  The model should be configured to accept noise as input (unconditional UNet)")
+        print("  Consider setting --use_teacher_noise_as_input True")
+    
+    # Load teacher model and VAE
+    print("Loading teacher model...")
+    import sys
+    import copy
+    from diffusers import AutoencoderKL
+    from torchdyn.core import NeuralODE
+    
+    sys.path.insert(0, '/home/kha98/Desktop/conditional-flow-matching')
+    try:
+        from torchcfm.models.unet.unet import UNetModelWrapper as TeacherUNet
+    finally:
+        sys.path.remove('/home/kha98/Desktop/conditional-flow-matching')
+    
+    teacher_model = TeacherUNet(
+        dim=(4, H.image_size // 8, H.image_size // 8),
+        num_res_blocks=2,
+        num_channels=128,
+        channel_mult=[1, 2, 2, 2],
+        num_heads=4,
+        num_head_channels=64,
+        attention_resolutions="16",
+        dropout=0.1,
+    ).to('cuda')
+    
+    teacher_checkpoint_path = getattr(H, 'teacher_checkpoint_path', 
+        '/home/kha98/Desktop/flow-model-chirag/output_flow/flow-ffhq-debugfm/fm_cifar10_weights_step_84000.pt')
+    ckpt = torch.load(teacher_checkpoint_path, map_location='cuda')
+    teacher_model.load_state_dict(ckpt['ema_model'])
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+    
+    teacher_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to('cuda')
+    teacher_vae.eval()
+    for param in teacher_vae.parameters():
+        param.requires_grad = False
+    
+    print("Teacher model and VAE loaded successfully!")
+    
+    # Setup optimizer with same scheduler behavior as IMLE
+    # Simulates epochs: virtual_dataset_size / n_batch iterations = 1 epoch
+    from torch.optim import AdamW
+    from torch.optim.lr_scheduler import LambdaLR, StepLR, SequentialLR
+    from helpers.train_helpers import linear_warmup
+    
+    optimizer = AdamW(imle.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
+    
+    # Virtual dataset size for epoch simulation (default 100 like small dataset)
+    virtual_dataset_size = getattr(H, 'virtual_dataset_size', 100)
+    iters_per_epoch = max(1, virtual_dataset_size // H.n_batch)
+    
+    # Get num_iters
+    num_iters = getattr(H, 'num_iters', None)
+    if num_iters is None:
+        num_iters = H.num_epochs * iters_per_epoch
+    
+    # Same scheduler as IMLE: warmup (per-iteration) then StepLR (per-epoch)
+    # scheduler1: linear warmup over warmup_iters iterations
+    # scheduler2: StepLR that decays every lr_decay_iters epochs
+    scheduler1 = LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+    scheduler2 = StepLR(optimizer, step_size=H.lr_decay_iters, gamma=H.lr_decay_rate)
+    scheduler = SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[H.warmup_iters])
+    
+    logprint(f'IMLE-style scheduler (virtual epochs):')
+    logprint(f'  - Virtual dataset size: {virtual_dataset_size}')
+    logprint(f'  - Iterations per epoch: {iters_per_epoch} (= {virtual_dataset_size} / {H.n_batch})')
+    logprint(f'  - Warmup: 0 to {H.warmup_iters} iters (linear warmup, stepped per iteration)')
+    logprint(f'  - StepLR: decay by {H.lr_decay_rate} every {H.lr_decay_iters} epochs (stepped per epoch)')
+    logprint(f'  - Total iterations: {num_iters} (~{num_iters // iters_per_epoch} epochs)')
+    
+    # Try to restore from checkpoint
+    iterate = 0
+    if H.restore_optimizer_path:
+        optimizer.load_state_dict(
+            torch.load(H.restore_optimizer_path, map_location='cuda', weights_only=False))
+        logprint(f'Restored optimizer from {H.restore_optimizer_path}')
+    if H.restore_scheduler_path:
+        scheduler.load_state_dict(
+            torch.load(H.restore_scheduler_path, map_location='cuda', weights_only=False))
+        logprint(f'Restored scheduler from {H.restore_scheduler_path}')
+    
+    # Track restored best_fid for later use
+    restored_best_fid = None
+    
+    if H.restore_log_path:
+        # Simple restore for resample_every_batch (only needs step, no epoch)
+        import json
+        import re
+        loaded = [json.loads(l) for l in open(H.restore_log_path)]
+        iterate = max([z['step'] for z in loaded if 'type' in z and z['type'] == 'train_loss'])
+        
+        # Also restore best_fid from log messages
+        for entry in loaded:
+            if 'message' in entry and 'New best FID:' in entry['message']:
+                # Parse "New best FID: 72.16 @ iteration 64000"
+                match = re.search(r'New best FID: ([\d.]+)', entry['message'])
+                if match:
+                    restored_best_fid = float(match.group(1))
+        
+        logprint(f'Restored training state: starting at iteration {iterate}')
+        if restored_best_fid is not None:
+            logprint(f'Restored best FID: {restored_best_fid}')
+    
+    print(f"Starting iteration: {iterate}")
+    print(f"Batch size: {H.n_batch}")
+    print(f"Teacher resample steps: {getattr(H, 'teacher_resample_steps', 20)}")
+    
+    stats = []
+    H.ema_rate = torch.as_tensor(H.ema_rate)
+    
+    # Create a simple loss calculator (like sampler.calc_loss) without full sampler
+    from LPNet import LPNet
+    class SimpleLossCalculator:
+        def __init__(self, H):
+            self.H = H
+            self.lpips_net = LPNet(pnet_type=H.lpips_net, path=H.lpips_path).cuda()
+            self.l2_loss = torch.nn.MSELoss(reduce=False).cuda()
+        
+        def calc_loss(self, inp, tar, use_mean=True, logging=False):
+            """Same calc_loss as in sampler.py"""
+            inp_feat, inp_shape = self.lpips_net(inp)
+            tar_feat, _ = self.lpips_net(tar)
+            
+            if use_mean:       
+                l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
+                res = 0
+            
+                for i, g_feat in enumerate(inp_feat):
+                    lpips_feature_loss = (g_feat - tar_feat[i]) ** 2
+                    res += torch.sum(lpips_feature_loss, dim=1) / (inp_shape[i] ** 2)
+                
+                loss = self.H.lpips_coef * res.mean() + self.H.l2_coef * l2_loss.mean()
+                if logging:
+                    return loss, res.mean(), l2_loss.mean()
+                else:
+                    return loss
+            else:
+                res = 0
+                for i, g_feat in enumerate(inp_feat):
+                    res += torch.sum((g_feat - tar_feat[i]) ** 2, dim=1) / (inp_shape[i] ** 2)
+                l2_loss = torch.mean(self.l2_loss(inp, tar), dim=[1, 2, 3])
+                loss = self.H.lpips_coef * res + self.H.l2_coef * l2_loss
+                if logging:
+                    return loss, res.mean(), l2_loss
+                else:
+                    return loss
+    
+    loss_calculator = SimpleLossCalculator(H)
+    
+    # Training loop - no epochs, just iterations
+    # num_iters already calculated above for scheduler
+    print(f"Training for {num_iters} iterations...")
+    
+    latent_size = H.image_size // 8
+    
+    # Get res from decoder blocks
+    from models import parse_layer_string
+    blocks = parse_layer_string(H.dec_blocks)
+    res = sorted(set([s[0] for s in blocks if s[0] <= H.max_hierarchy]))
+    
+    # Use restored best_fid if available, otherwise start fresh
+    best_fid = restored_best_fid if restored_best_fid is not None else float('inf')
+    
+    for iteration in range(iterate, num_iters):
+        # 1. Generate n_batch fresh noise (conditions)
+        batch_noise = torch.randn(H.n_batch, 4, latent_size, latent_size, device='cuda')
+        
+        # 2. Teacher generates samples from noise
+        with torch.no_grad():
+            teacher_copy = copy.deepcopy(teacher_model)
+            node = NeuralODE(teacher_copy, solver="euler", sensitivity="adjoint")
+            
+            traj = node.trajectory(
+                batch_noise,
+                t_span=torch.linspace(0, 1, getattr(H, 'teacher_resample_steps', 20), device='cuda'),
+            )
+            teacher_latents = traj[-1, :].view(batch_noise.shape)
+            
+            # Decode latents → images (VAE outputs in [-1, 1] range)
+            teacher_images = teacher_vae.decode(
+                teacher_latents / teacher_vae.config.scaling_factor
+            ).sample  # [B, C, H, W] in [-1, 1]
+            
+            # Denormalize from [-1, 1] to [0, 1] and then to [0, 255]
+            # (Exactly like generate_new_data_from_teacher in sampler.py)
+            teacher_images = (teacher_images + 1) / 2
+            teacher_images = torch.clamp(teacher_images, 0, 1) * 255
+            
+            # Convert to uint8 and permute to [B, H, W, C]
+            teacher_images = teacher_images.byte().permute(0, 2, 3, 1).cpu()
+        
+        # 3. Prepare teacher images as targets for training
+        #    Teacher outputs are uint8 in [0, 255]; convert to [-1, 1] to match model output range
+        #    (Exactly like preprocess_fn: x / 127.5 - 1)
+        targets = (teacher_images.float() / 127.5 - 1.0).cuda()  # [B, H, W, C] in [-1, 1]
+        
+        # 4. Student uses the SAME noise as input (unconditional, no conditions)
+        # Treat noise as latents directly; model is unconditional (no condition_data)
+        batch_latents = batch_noise  # shape: [B, 4, H//8, W//8]
+        
+        # No spatial noise (snoise) in this simple mode
+        batch_snoise = None
+        
+        # 5. Training step - use the same calc_loss as regular IMLE training
+        stat = training_step_imle(
+            H,
+            H.n_batch,
+            targets,
+            batch_latents,
+            batch_snoise,
+            imle,
+            ema_imle,
+            optimizer,
+            loss_calculator.calc_loss,  # Use the same calc_loss function
+            condition_data=None,
+            batch_conditions=None,
+            batch_condition_indices=None,
+        )
+        stats.append(stat)
+        
+        # Step scheduler like IMLE:
+        # - During warmup: step every iteration
+        # - After warmup: step every iters_per_epoch (once per virtual epoch)
+        if iteration <= H.warmup_iters:
+            scheduler.step()
+        elif (iteration - H.warmup_iters) % iters_per_epoch == 0:
+            # End of virtual epoch, step the StepLR scheduler
+            scheduler.step()
+
+        # Logging and saving
+        if iteration % 500 == 0:
+            with torch.no_grad():
+                generate_visualization_grid(
+                    batch_noise=batch_noise,
+                    teacher_images=teacher_images,
+                    teacher_model=teacher_model,
+                    teacher_vae=teacher_vae,
+                    imle=imle,
+                    H=H,
+                    latent_size=latent_size,
+                    iteration=iteration,
+                    experiment=experiment,
+                    save_dir=H.save_dir,
+                    rows=5,
+                    cols=5
+                )
+        
+        # Save latest model every 1000 iterations (overwrites previous)
+        if iteration % 750 == 0 and iteration > 0:
+            fp = os.path.join(H.save_dir, 'latest')
+            logprint(f'Saving latest model @ iteration {iteration} to {fp}')
+            save_model(fp, imle, ema_imle, optimizer, scheduler, H)
+        
+        # Log metrics
+        if iteration % 100 == 0:
+            loss_val = stat['loss'].item() if hasattr(stat['loss'], 'item') else stat['loss']
+            logprint(model=H.desc, type='train_loss', step=iteration, loss=loss_val)
+            if experiment is not None:
+                experiment.log_metric('loss', loss_val, step=iteration)
+        
+        # FID calculation - use student model to generate images
+        fid_freq_iters = getattr(H, 'fid_freq_iters', 1000)  # FID frequency in iterations
+        if iteration > 0 and iteration % fid_freq_iters == 0:
+            print("Calculating FID with student-generated images (unconditional IMLE-style)...")
+            num_fid_samples = min(1000, H.n_batch * H.fid_factor)
+            
+            # Clear FID directory first
+            delete_content_of_dir(f'{H.save_dir}/fid')
+            
+            # Use EMA model if available for better quality
+            model_to_use = ema_imle if ema_imle is not None else imle
+            model_to_use.eval()
+            
+            with torch.no_grad():
+                sample_idx = 0
+                for i in range(0, num_fid_samples, H.n_batch):
+                    batch_size = min(H.n_batch, num_fid_samples - i)
+                    if batch_size <= 0:
+                        continue
+                    
+                    batch_fid_noise = torch.randn(batch_size, 4, latent_size, latent_size, device='cuda')
+
+                    # Unconditional IMLE-style: noise is passed directly as latents, no snoise, no conditions
+                    px_z = model_to_use(batch_fid_noise, None).permute(0, 2, 3, 1)  # [B, H, W, C]
+                    xhat = ((px_z + 1.0) * 127.5).clamp(0, 255).detach().cpu().numpy().astype(np.uint8)
+                    
+                    for j in range(batch_size):
+                        imageio.imwrite(f'{H.save_dir}/fid/{sample_idx}.png', xhat[j])
+                        sample_idx += 1
+            
+            model_to_use.train()
+
+            try:
+                cur_fid = fid.compute_fid(H.fid_real_dir, f'{H.save_dir}/fid/', verbose=False)
+                print(f"FID: {cur_fid}")
+                if experiment is not None:
+                    experiment.log_metric('fid', cur_fid, step=iteration)
+                
+                # Save best FID model
+                if cur_fid < best_fid:
+                    best_fid = cur_fid
+                    fp = os.path.join(H.save_dir, 'best_fid')
+                    logprint(f'New best FID: {cur_fid:.2f} @ iteration {iteration}, saving to {fp}')
+                    save_model(fp, imle, ema_imle, optimizer, scheduler, H)
+                    if experiment is not None:
+                        experiment.log_metric('best_fid', best_fid, step=iteration)
+            except Exception as e:
+                print(f"FID computation failed: {e}")
+    
+    print("Training complete!")
+
+
 def main(H=None):
     H_cur, logprint = set_up_hyperparams()
     if not H:
         H = H_cur
-    H, data_train, data_valid_or_test, preprocess_fn, condition_data = set_up_data(H)
+    # In resample_every_batch mode, we don't need to load a dataset from disk.
+    if getattr(H, "resample_every_batch", False):
+        data_train = None
+        data_valid_or_test = None
+        preprocess_fn = None
+        condition_data = None
+        print("Resample-every-batch mode: skipping set_up_data() dataset loading")
+    else:
+        H, data_train, data_valid_or_test, preprocess_fn, condition_data = set_up_data(H)
     
     imle, ema_imle = load_imle(H, logprint)
 
@@ -877,7 +1366,11 @@ def main(H=None):
 
     elif H.mode == 'train':
         print(H)
-        train_loop_imle(H, data_train, data_valid_or_test, preprocess_fn, imle, ema_imle, logprint, experiment, condition_data)
+        # Check if resample_every_batch mode is enabled
+        if hasattr(H, 'resample_every_batch') and H.resample_every_batch:
+            train_loop_resample_every_batch(H, imle, ema_imle, logprint, experiment)
+        else:
+            train_loop_imle(H, data_train, data_valid_or_test, preprocess_fn, imle, ema_imle, logprint, experiment, condition_data)
 
     elif H.mode == 'ppl':
         sampler = Sampler(H, H.subset_len, preprocess_fn)
