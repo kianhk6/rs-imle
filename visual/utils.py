@@ -26,7 +26,7 @@ def get_sample_for_visualization(data, preprocess_fn, num, dataset):
 
 
 
-def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None, save_to_file=False):
+def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logprint, condition_data=None, save_to_file=False, experiment=None):
     mb = shape[0]
     initial = initial[:mb].cuda()
     if condition_data is not None:
@@ -42,8 +42,13 @@ def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logp
     if save_to_file:
         logprint(f'printing samples to {fname}')
         imageio.imwrite(fname, im)
+        # if experiment:
+        #     experiment.log_image(fname, overwrite=False)
     else:
         logprint(f'generated samples (not saved to file, only for logging)')
+        # if experiment:
+        #     # Log numpy array directly to comet without saving to file
+        #     experiment.log_image(im, name=fname, overwrite=False)
     
     return im
 
@@ -77,12 +82,12 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, name=image_name, overwrite=False)
+                experiment.log_image(fname, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
                 # Log numpy array directly to comet without saving to file
-                experiment.log_image(im, name=image_name, overwrite=False)
+                experiment.log_image(im, name=fname, overwrite=False)
     else:
         batches = [orig[:mb], sampler.sample(initial, imle, snoise)]
         temp_latent_rnds = torch.randn([mb, H.latent_dim], dtype=torch.float32).cuda()
@@ -100,12 +105,12 @@ def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_
             logprint(f'printing samples to {fname}')
             imageio.imwrite(fname, im)
             if(experiment):
-                experiment.log_image(fname, name=image_name, overwrite=False)
+                experiment.log_image(fname, overwrite=False)
         else:
             logprint(f'generated samples (not saved to file, only for logging)')
             if(experiment):
                 # Log numpy array directly to comet without saving to file
-                experiment.log_image(im, name=fname, overwrite=True)
+                experiment.log_image(im, name=fname, overwrite=False)
 
 
 
@@ -120,26 +125,23 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
             for i in range(0, (n_samp // H.imle_batch)+1):
                 
                 batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
-                # Skip if there is no work left (avoids empty stacks when n_samp is divisible by batch size)
-                if batch_size == 0:
-                    break
+                
+                # Skip if batch_size is 0 or negative
+                if batch_size <= 0:
+                    continue
                 
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]
                 
-                # Handle condition data batching
-                # For FID: sample conditions from Gaussian prior (like in generate_images_initial line 68)
+                # Generate random noise as conditions (not using actual condition_data)
                 batch_condition_data = None
                 if condition_data is not None:
-                    # Sample random conditions from Gaussian prior matching the condition data shape
-                    # Use first condition as template to get the shape
-                    first_cond = condition_data[0]
-                    if isinstance(first_cond, tuple):
-                        cond_shape = first_cond[0].shape
-                    else:
-                        cond_shape = first_cond.shape
-                    # Sample from Gaussian prior (same approach as generate_images_initial)
-                    batch_condition_data = torch.randn([batch_size, *cond_shape], dtype=torch.float32).cuda()
+                    # Get a sample to determine the condition shape
+                    sample_cond = condition_data[0]
+                    if isinstance(sample_cond, tuple):
+                        sample_cond = sample_cond[0]
+                    # Generate random noise with the same shape
+                    batch_condition_data = torch.randn(batch_size, *sample_cond.shape, device='cuda')
                 
                 samp = sampler.sample(temp_latent_rnds[:batch_size], imle, [s[:batch_size] for s in tmp_snoise], condition_data=batch_condition_data)
 
@@ -152,6 +154,10 @@ def generate_and_save(H, imle, sampler, n_samp, subdir='fid', condition_data=Non
             for i in range(0, (n_samp // H.imle_batch)+1):
                 
                 batch_size = min(H.imle_batch, n_samp-i*H.imle_batch)
+                
+                # Skip if batch_size is 0 or negative
+                if batch_size <= 0:
+                    continue
 
                 temp_latent_rnds.normal_()
                 tmp_snoise = [s[:H.imle_batch].normal_() for s in sampler.snoise_tmp]

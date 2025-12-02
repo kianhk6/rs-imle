@@ -633,12 +633,13 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, condition=None):
+    def forward(self, x, condition=None, return_latent_only=False):
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param condition: an vector condition
-        :return: an [N x C x ...] Tensor of outputs.
+        :param return_latent_only: if True, return the latent before VAE decode (without statistics)
+        :return: an [N x C x ...] Tensor of outputs (decoded images or latent).
         """
 
         # Determine embedding based on conditioning configuration
@@ -679,6 +680,10 @@ class UNetModel(nn.Module):
 
         latent = self.out(h.to(x.dtype))
         latent = latent 
+        
+        # If return_latent_only is True, return the latent before VAE decode
+        if return_latent_only:
+            return latent
         decoded_images = self.vae.decode(latent /  self.vae.config.scaling_factor).sample
         return decoded_images
 
@@ -977,14 +982,15 @@ class UNetModelWrapper(UNetModel):
             variance_booster=variance_booster
         )
 
-    def forward(self, x, condition=None, *args, **kwargs):
+    def forward(self, x, condition=None, return_latent_only=False, *args, **kwargs):
         """Forward pass with optional timestep.
         
         Args:
             x: Input tensor [N x C x ...]
             condition: Optional conditioning information (not used for timestep in this implementation)
+            return_latent_only: If True, return latent before VAE decode instead of decoded images
         
         Returns:
-            Output tensor [N x C x ...]
+            Output tensor [N x C x ...] - decoded images, or latent if return_latent_only=True
         """
-        return super().forward(x=x, condition=condition)
+        return super().forward(x=x, condition=condition, return_latent_only=return_latent_only)

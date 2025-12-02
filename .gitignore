@@ -26,3 +26,10 @@ vae/
 runs/
 prev-model/
 old-logs/
+
+**/__pycache__/
+teacher/
+__pycache__/
+# Python cache
+__pycache__/
+*.pyc

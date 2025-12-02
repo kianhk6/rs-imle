@@ -69,6 +69,12 @@ def add_imle_arguments(parser):
     # num of workers 
 
     parser.add_argument('--lr', type=float, default=0.0002)  # learning rate
+    
+    # Dynamic scheduler arguments (for teacher resampling)
+    parser.add_argument('--dynamic_scheduler_type', type=str, default='cosine', choices=['cosine', 'piecewise'])  # Scheduler type for dynamic resampling: 'cosine' for CosineAnnealingWarmRestarts, 'piecewise' for PiecewiseConstantWithRestart
+    parser.add_argument('--lr_min', type=float, default=1e-5)  # Minimum learning rate floor for dynamic schedulers
+    parser.add_argument('--lr_tail_epochs', type=int, default=200)  # (Piecewise only) Number of epochs before resample to start decay
+    parser.add_argument('--lr_tail_decay', type=float, default=0.99)  # (Piecewise only) Decay factor per epoch during tail phase
 
     parser.add_argument('--wd', type=float, default=0.00)  # weight decay
     parser.add_argument('--num_epochs', type=int, default=15000)  # number of epochs
@@ -147,6 +153,24 @@ def add_imle_arguments(parser):
     parser.add_argument('--comet_name', type=str, default='AdaptiveIMLE')  # used in comet.ml
     parser.add_argument('--comet_api_key', type=str, default='')  # comet.ml api key -- leave blank to disable comet.ml
     parser.add_argument('--comet_experiment_key', type=str, default='')
+    
+    # Teacher-based dynamic resampling
+    parser.add_argument('--use_teacher_resample', default=False, type=lambda x: bool(strtobool(x)))
+    parser.add_argument('--teacher_checkpoint_path', type=str, default='/home/kha98/Desktop/flow-model-chirag/output_flow/flow-ffhq-debugfm/fm_cifar10_weights_step_84000.pt')
+    parser.add_argument('--teacher_resample_steps', type=int, default=20)
+    parser.add_argument('--teacher_num_samples', type=int, default=100)  # Number of samples to generate during resampling
+    parser.add_argument('--teacher_force_resample', type=int, default=None)  # Force complete dataset renewal every N resampling steps (must be multiple of imle_force_resample)
+    
+    # Teacher force resample scheduling (list-based for multiple phases)
+    parser.add_argument('--use_teacher_resample_schedule', default=False, type=lambda x: bool(strtobool(x)))  # Enable dynamic scheduling for teacher_force_resample
+    parser.add_argument('--every_n_epochs_resample_data', type=str, default=None)  # Comma-separated list: how often to resample in each phase (e.g., "800,200,100,50") - length must be N+1
+    parser.add_argument('--change_schedule_of_data_resampling_every_n_epoch', type=str, default=None)  # Comma-separated list: epoch boundaries between phases (e.g., "800,2000,6000") - length must be N
+    parser.add_argument('--teacher_generate_initial_data', default=False, type=lambda x: bool(strtobool(x)))  # Generate initial dataset from teacher at epoch 0 (instead of loading from disk)
+    parser.add_argument('--use_teacher_noise_as_input', default=False, type=lambda x: bool(strtobool(x)))  # Regression mode: use teacher noise as input
+    parser.add_argument('--resample_every_batch', default=False, type=lambda x: bool(strtobool(x)))  # Simple mode: generate fresh noise every batch, teacher generates samples, student learns from same noise (no dataset/epochs)
+    parser.add_argument('--num_iters', type=int, default=None)  # Number of iterations for resample_every_batch mode (defaults to num_epochs * iters_per_epoch if not set)
+    parser.add_argument('--virtual_dataset_size', type=int, default=100)  # Virtual dataset size for epoch simulation in resample_every_batch mode (iters_per_epoch = virtual_dataset_size / n_batch)
+    parser.add_argument('--fid_freq_iters', type=int, default=1000)  # FID calculation frequency in iterations for resample_every_batch mode
 
 
     parser.add_argument('--latent_lr', type=float, default=0.0001)  # learning rate for optimizing latent codes -- not used
