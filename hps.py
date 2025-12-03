@@ -170,6 +170,10 @@ def add_imle_arguments(parser):
     parser.add_argument('--num_iters', type=int, default=None)  # Number of iterations for resample_every_batch mode (defaults to num_epochs * iters_per_epoch if not set)
     parser.add_argument('--virtual_dataset_size', type=int, default=100)  # Virtual dataset size for epoch simulation in resample_every_batch mode (iters_per_epoch = virtual_dataset_size / n_batch)
     parser.add_argument('--fid_freq_iters', type=int, default=1000)  # FID calculation frequency in iterations for resample_every_batch mode
+    
+    # Teacher loss - distillation from flow model
+    parser.add_argument('--use_teacher_loss', default=False, type=lambda x: bool(strtobool(x)))  # Enable teacher loss: L = L_imle + lambda * L_teacher where L_teacher = MSE(G_imle(z), G_flow(z))
+    parser.add_argument('--teacher_loss_lambda', type=float, default=1.0)  # Weight for teacher loss term (lambda in Loss = L_imle + lambda * L_teacher)
 
 
     parser.add_argument('--latent_lr', type=float, default=0.0001)  # learning rate for optimizing latent codes -- not used

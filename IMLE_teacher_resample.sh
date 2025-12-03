@@ -319,32 +319,26 @@ CUDA_VISIBLE_DEVICES=1 python /home/kha98/Desktop/rs-imle/train.py \
 # Example usage:
 # nohup bash -c '
 nohup bash -c '
-CUDA_VISIBLE_DEVICES=0 python /home/kha98/Desktop/rs-imle/train.py \
+runongpu 0 python /home/kha98/Desktop/rs-imle/train.py \
     --hps fewshot \
-    --save_dir /localscratch/kian/resample_teacher/resample-every-batch-simple/ \
+    --save_dir /localscratch/kian/resample_teacher/resample-every-batch-lr-1/ \
     --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
     --model_type unet \
     --use_comet True \
     --latent_dim 4096 \
-    --comet_name resample-every-batch-simple \
+    --comet_name resample-every-batch-lr-1 \
     --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB \
     --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
     --teacher_resample_steps 20 \
-    --lr 0.0004 \
+    --lr 0.001 \
     --lr_decay_rate 0.25 \
     --n_batch 20 \
     --use_teacher_noise_as_input True \
     --resample_every_batch True \
     --num_iters 1000000 \
     --virtual_dataset_size 100 \
-    --fid_freq_iters 1000 \
-    --comet_experiment_key 041d93dd132c4348a83544e3fd7cdbea \
-    --restore_path /localscratch/kian/resample_teacher/resample-every-batch-simple/train/latest-model.th \
-    --restore_ema_path /localscratch/kian/resample_teacher/resample-every-batch-simple/train/latest-model-ema.th \
-    --restore_log_path /localscratch/kian/resample_teacher/resample-every-batch-simple/train/latest-log.jsonl \
-    --restore_optimizer_path /localscratch/kian/resample_teacher/resample-every-batch-simple/train/latest-opt.th \
-    --restore_scheduler_path /localscratch/kian/resample_teacher/resample-every-batch-simple/train/latest-sched.th \
-' > /localscratch/kian/resample_teacher/resample-every-batch-simple/train.log 2>&1 &
+    --fid_freq_iters 1000 
+' > /localscratch/kian/resample_teacher/resample-every-batch-lr-1/train.log 2>&1 &
 
 # ============================================================================
 

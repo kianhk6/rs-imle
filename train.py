@@ -196,7 +196,16 @@ def training_step_imle(H, n, targets, latents, snoise, imle, ema_imle, optimizer
             px_z = imle(cur_batch_latents, snoise, condition_data=batch_conditions)
     else:
         px_z = imle(cur_batch_latents, snoise)
-    loss = loss_fn(px_z, targets.permute(0, 3, 1, 2))
+    
+    # Compute loss - pass latents for teacher loss computation if enabled
+    # Note: latents parameter is already the selected_latents from sampler for this batch
+    if getattr(H, 'use_teacher_loss', False):
+        # Pass the latents (selected noise codes z) to loss function for teacher loss computation
+        # Ensure latents are on CUDA for teacher model inference
+        loss = loss_fn(px_z, targets.permute(0, 3, 1, 2), selected_latents=cur_batch_latents.cuda())
+    else:
+        loss = loss_fn(px_z, targets.permute(0, 3, 1, 2))
+    
     loss.backward()
     optimizer.step()
     if ema_imle is not None:
@@ -234,12 +243,20 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
     if subset_len == -1:
         subset_len = len(data_train)
     
-    # Load teacher model and VAE if teacher resampling is enabled
+    # Load teacher model and VAE if teacher resampling OR teacher loss is enabled
     teacher_model = None
     teacher_vae = None
     
-    if hasattr(H, 'use_teacher_resample') and H.use_teacher_resample:
-        print("Loading teacher model for dynamic resampling...")
+    use_teacher_for_resample = hasattr(H, 'use_teacher_resample') and H.use_teacher_resample
+    use_teacher_for_loss = hasattr(H, 'use_teacher_loss') and H.use_teacher_loss
+    
+    if use_teacher_for_resample or use_teacher_for_loss:
+        purposes = []
+        if use_teacher_for_resample:
+            purposes.append("dynamic resampling")
+        if use_teacher_for_loss:
+            purposes.append("teacher loss")
+        print(f"Loading teacher model for {' and '.join(purposes)}...")
         import sys
         import importlib.util
         import copy
@@ -280,6 +297,13 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
             param.requires_grad = False
         
         print("Teacher model and VAE loaded successfully!")
+        
+        # Print teacher loss configuration if enabled
+        if use_teacher_for_loss:
+            teacher_lambda = getattr(H, 'teacher_loss_lambda', 1.0)
+            print(f"✓ Teacher loss enabled with lambda={teacher_lambda}")
+            print(f"  Loss = L_imle + {teacher_lambda} * L_teacher")
+            print(f"  where L_teacher = (1/|S|) * sum || G_imle(z) - G_flow(z) ||^2")
         
         # Check if we should generate initial data
         if hasattr(H, 'teacher_generate_initial_data') and H.teacher_generate_initial_data:

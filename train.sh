@@ -319,7 +319,26 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0 python train.py --hps fewshot \
 
 
 
-
+CUDA_VISIBLE_DEVICES=1 python /home/kha98/Desktop/rs-imle/train.py \
+    --hps fewshot \
+    --save_dir /home/kha98/Desktop/rs-imle/runs/unet_teacher_loss_ffhq100 \
+    --data_root /home/kha98/Desktop/rs-imle/teacher/clean/ \
+    --fid_real_dir /home/kha98/Desktop/rs-imle/teacher/clean/img \
+    --model_type unet \
+    --latent_dim 4096 \
+    --lr 0.0003 \
+    --force_factor 20 \
+    --imle_force_resample 10 \
+    --imle_db_size 2000 \
+    --imle_batch 50 \
+    --n_batch 20 \
+    --use_teacher_loss True \
+    --teacher_loss_lambda 1.0 \
+    --teacher_checkpoint_path /home/kha98/Desktop/rs-imle/teacher/fm_cifar10_weights_step_84000.pt \
+    --teacher_resample_steps 20 \
+    --use_comet True \
+    --comet_name unet-teacher-loss-ffhq100 \
+    --comet_api_key esx5iX53IbgtEtr4Zj1tkxpYB
 
 
 
