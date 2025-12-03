@@ -188,6 +188,13 @@ python train.py --hps fewshot \
     --lr 0.0002 
 
 
+# python train.py \
+#   --hps fewshot \
+#   --mode eval_fid \
+#   --restore_path /home/kianhk6/projects/def-keli/kianhk6/rs-imle/runs/VDVAE-clean-fact-20/train/latest-model.th \
+#   --fid_real_dir /home/kianhk6/projects/def-keli/kianhk6/rs-imle/dataset/ffhq/clean \
+#   --data_root /home/kianhk6/projects/def-keli/kianhk6/rs-imle/dataset/ffhq/clean \
+#   --save_dir /home/kianhk6/projects/def-keli/kianhk6/rs-imle/runs/VDVAE-clean-fact-20/fid_eval
 # ============================================================
 # Model Selection Examples with --model_type hyperparameter
 # ============================================================

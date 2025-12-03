@@ -754,6 +754,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                 viz_batch_original.shape, imle, ema_imle,
                                 f'{iterate}.png', logprint, experiment,
                                 condition_data=cond_vis2,
+                                epoch=epoch,
                             )
                         else:
                             generate_images_initial(H, sampler, viz_batch_original,
@@ -806,25 +807,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                                                                                 dists_lpips=cur_dists_lpips,
                                                                                 dists_l2=cur_dists_l2, 
                                                                                 logging=True)
-            # # Compute metrics with the generator in eval mode to avoid dropout noise
-            # was_training = imle.training
-            # imle.eval()
-            # try:
-            #     cur_dists[:], cur_dists_lpips[:], cur_dists_l2[:] = sampler.calc_dists_existing(
-            #         split_x_tensor,
-            #         imle,
-            #         dists=cur_dists,
-            #         dists_lpips=cur_dists_lpips,
-            #         dists_l2=cur_dists_l2,
-            #         logging=True,
-            #         conditions=split_condition_data,
-            #         expect_condition_indices=False,
-            #     )
-            # finally:
-            #     if was_training:
-            #         imle.train()
-            # torch.save(cur_dists, f'{H.save_dir}/latent/dists-{epoch}.npy')
-                    
+                                                                                
             metrics = {
                 'mean_loss': torch.mean(cur_dists).item(),
                 'std_loss': torch.std(cur_dists).item(),
@@ -897,7 +880,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                             [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                             viz_batch_original.shape, imle, ema_imle,
                             f'{H.save_dir}/latest.png', logprint, experiment,
-                            condition_data=cond_vis2,
+                            condition_data=cond_vis2, epoch=epoch,
                         )
 
                     else:
@@ -905,7 +888,7 @@ def train_loop_imle(H, data_train, data_valid, preprocess_fn, imle, ema_imle, lo
                         sampler.selected_latents[0: H.num_images_visualize],
                         [s[0: H.num_images_visualize] for s in sampler.selected_snoise],
                         viz_batch_original.shape, imle, ema_imle,
-                        f'{H.save_dir}/latest.png', logprint, experiment)                    
+                        f'{H.save_dir}/latest.png', logprint, experiment, epoch=epoch)                    
 
 
             

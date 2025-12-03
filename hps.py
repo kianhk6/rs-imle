@@ -81,8 +81,9 @@ def add_imle_arguments(parser):
     parser.add_argument('--n_batch', type=int, default=8)  # batch size
     parser.add_argument('--adam_beta1', type=float, default=0.9)
     parser.add_argument('--adam_beta2', type=float, default=0.9)
+    parser.add_argument('--variance_booster', type=int, default=1)
 
-    parser.add_argument('--iters_per_ckpt', type=int, default=100000)  # number of iterations per checkpoint
+    parser.add_argument('--iters_per_ckpt', type=int, default=100000000000)  # number of iterations per checkpoint
     parser.add_argument('--iters_per_save', type=int, default=1000)  # number of iterations per saving the latest models
     parser.add_argument('--iters_per_images', type=int, default=5000)  # number of iterations per sample save
     parser.add_argument('--num_images_visualize', type=int, default=10)  # number of images to visualize

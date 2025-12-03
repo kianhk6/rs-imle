@@ -18,6 +18,15 @@ train_log.txt
 default/
 
 datasets.zip
+
+__pycache__/
+*.pyc
+VDVAE-configs/
+vae/
+runs/
+prev-model/
+old-logs/
+
 **/__pycache__/
 teacher/
 __pycache__/

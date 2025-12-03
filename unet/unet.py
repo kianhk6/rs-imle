@@ -428,7 +428,8 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         use_learnable_timestep=False,
-        use_conditioning=True
+        use_conditioning=True,
+        variance_booster=1
     ):
         super().__init__()
 
@@ -451,6 +452,7 @@ class UNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.use_learnable_timestep = use_learnable_timestep
         self.use_conditioning = use_conditioning
+        self.variance_booster = variance_booster
 
         if not use_conditioning and not use_learnable_timestep:
             # No conditioning and no learnable timestep - skip embedding layers
@@ -928,6 +930,7 @@ class UNetModelWrapper(UNetModel):
         use_new_attention_order=False,
         use_learnable_timestep=False,
         use_conditioning=True,
+        variance_booster=1,
         **kwargs,  # Absorb any additional arguments
     ):
         self.use_learnable_timestep = use_learnable_timestep
@@ -975,7 +978,8 @@ class UNetModelWrapper(UNetModel):
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
             use_learnable_timestep=use_learnable_timestep,
-            use_conditioning=use_conditioning
+            use_conditioning=use_conditioning,
+            variance_booster=variance_booster
         )
 
     def forward(self, x, condition=None, return_latent_only=False, *args, **kwargs):

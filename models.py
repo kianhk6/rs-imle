@@ -189,6 +189,7 @@ class IMLE(nn.Module):
                 attention_resolutions="16",
                 dropout=0.1,
                 use_conditioning=use_conditioning,
+                variance_booster=H.variance_booster,
             )
             if use_teacher_noise_as_input:
                 assert not use_conditioning, "Regression mode requires unconditional UNet!"

@@ -53,9 +53,10 @@ def generate_for_NN(sampler, orig, initial, snoise, shape, ema_imle, fname, logp
     return im
 
 
-def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None, save_to_file=False):
+def generate_images_initial(H, sampler, orig, initial, snoise, shape, imle, ema_imle, fname, logprint, experiment=None, condition_data=None, save_to_file=False, epoch=None):
     mb = shape[0]
     initial = initial[:mb]
+    image_name = str(epoch) if epoch is not None else os.path.basename(fname)
     if condition_data is not None:
         batches = [orig[:mb]]
         # Row 1: with matching condition slice if provided
